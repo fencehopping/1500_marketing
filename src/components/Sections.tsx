@@ -1,5 +1,7 @@
 import heroImageUrl from "../../assets/hero1.png";
 import previewImageUrl from "../../assets/hero2.png";
+import planningImageUrl from "../../assets/hero3.png";
+import recipeImageUrl from "../../assets/hero4.png";
 import logoUrl from "../../assets/1500_logo.png";
 import consistencyIconUrl from "../../assets/consistency.png";
 import fastIconUrl from "../../assets/fast.png";
@@ -57,9 +59,9 @@ const mealPlanningPoints = [
 ];
 
 const recipePoints = [
-  "Simple meal ideas that fit the target",
-  "Visual cards creators can show clearly on camera",
-  "Easy swaps for people who repeat meals often",
+  "Easy meal concepts that perform well on Reels, Shorts, and TikTok",
+  "Clean visual cards that make recipes effortless to explain on camera",
+  "Repeatable meal ideas followers can build into everyday routines",
 ];
 
 export function Hero() {
@@ -156,14 +158,14 @@ export function MealPlanning() {
           Fifteen Hundred gives people a simple way to map meals around their daily target, so staying consistent
           feels planned instead of improvised.
         </p>
+        <ul className="detail-list">
+          {mealPlanningPoints.map((point) => (
+            <li key={point}>{point}</li>
+          ))}
+        </ul>
       </div>
-      <div className="detail-card">
-        {mealPlanningPoints.map((point) => (
-          <div className="detail-row" key={point}>
-            <span />
-            <p>{point}</p>
-          </div>
-        ))}
+      <div className="detail-visual">
+        <img className="detail-image" src={planningImageUrl} alt="Fifteen Hundred meal planning preview" />
       </div>
     </section>
   );
@@ -172,20 +174,24 @@ export function MealPlanning() {
 export function Recipes() {
   return (
     <section className="section-shell detail-section detail-section-flipped">
-      <div className="detail-card recipe-card">
-        {recipePoints.map((point) => (
-          <div className="detail-row" key={point}>
-            <span />
-            <p>{point}</p>
-          </div>
-        ))}
+      <div className="detail-visual">
+        <img
+          className="detail-image detail-image-compact"
+          src={recipeImageUrl}
+          alt="Fifteen Hundred recipe content preview"
+        />
       </div>
       <div className="detail-copy">
         <p className="eyebrow">Recipes</p>
-        <h2>Recipe ideas people can actually repeat.</h2>
+        <h2>Content your audience will actually save and remake.</h2>
+        <ul className="detail-list">
+          {recipePoints.map((point) => (
+            <li key={point}>{point}</li>
+          ))}
+        </ul>
         <p>
-          The app keeps recipes practical, visual, and easy to explain, which makes them a natural fit for shorts,
-          reels, and quick creator demos.
+          The app turns simple meals into highly shareable content, giving creators an endless stream of realistic
+          recipe ideas their audience can actually stick to, save, and come back for.
         </p>
       </div>
     </section>
