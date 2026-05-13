@@ -50,6 +50,18 @@ const benefits = [
   "Clear audience value",
 ];
 
+const mealPlanningPoints = [
+  "Plan the week around a simple calorie target",
+  "Keep breakfast, lunch, dinner, and snacks organized",
+  "Make consistency feel less like daily guesswork",
+];
+
+const recipePoints = [
+  "Simple meal ideas that fit the target",
+  "Visual cards creators can show clearly on camera",
+  "Easy swaps for people who repeat meals often",
+];
+
 export function Hero() {
   return (
     <section className="hero section-shell">
@@ -129,6 +141,52 @@ export function AppPreview() {
             </article>
           ))}
         </div>
+      </div>
+    </section>
+  );
+}
+
+export function MealPlanning() {
+  return (
+    <section className="section-shell detail-section">
+      <div className="detail-copy">
+        <p className="eyebrow">Meal planning</p>
+        <h2>Plan ahead without turning it into a spreadsheet.</h2>
+        <p>
+          Fifteen Hundred gives people a simple way to map meals around their daily target, so staying consistent
+          feels planned instead of improvised.
+        </p>
+      </div>
+      <div className="detail-card">
+        {mealPlanningPoints.map((point) => (
+          <div className="detail-row" key={point}>
+            <span />
+            <p>{point}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+export function Recipes() {
+  return (
+    <section className="section-shell detail-section detail-section-flipped">
+      <div className="detail-card recipe-card">
+        {recipePoints.map((point) => (
+          <div className="detail-row" key={point}>
+            <span />
+            <p>{point}</p>
+          </div>
+        ))}
+      </div>
+      <div className="detail-copy">
+        <p className="eyebrow">Recipes</p>
+        <h2>Recipe ideas people can actually repeat.</h2>
+        <p>
+          The app keeps recipes practical, visual, and easy to explain, which makes them a natural fit for shorts,
+          reels, and quick creator demos.
+        </p>
       </div>
     </section>
   );

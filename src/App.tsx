@@ -4,6 +4,8 @@ import {
   FeatureGrid,
   FinalCta,
   Hero,
+  MealPlanning,
+  Recipes,
 } from "./components/Sections";
 
 export default function App() {
@@ -12,6 +14,8 @@ export default function App() {
       <Hero />
       <FeatureGrid />
       <AppPreview />
+      <MealPlanning />
+      <Recipes />
       <BenefitGrid />
       <FinalCta />
     </main>
