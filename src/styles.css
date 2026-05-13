@@ -538,8 +538,8 @@ h3 {
 }
 
 .detail-image-compact {
-  width: min(300px, 100%);
-  max-height: 560px;
+  width: min(240px, 100%);
+  max-height: 480px;
 }
 
 .recipe-card {
