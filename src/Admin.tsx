@@ -40,8 +40,12 @@ declare global {
 }
 
 const adminEmail = "nickholroyd@gmail.com";
-const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
-const adminApiBaseUrl = import.meta.env.VITE_ADMIN_API_BASE_URL;
+const googleClientId =
+  import.meta.env.VITE_GOOGLE_CLIENT_ID ??
+  "534108723063-jj1of74k1snce3e1e7ltahqknhnlsu11.apps.googleusercontent.com";
+const adminApiBaseUrl =
+  import.meta.env.VITE_ADMIN_API_BASE_URL ??
+  "https://fifteenhundred-admin-api.fencehopping.workers.dev";
 
 const fallbackImages: ImageRecord[] = knownImageNames.map((name) => ({
   key: `images/${name}.png`,
