@@ -1,16 +1,16 @@
+import heroImageUrl from "../../assets/hero1.png";
+import previewImageUrl from "../../assets/hero2.png";
+import planningImageUrl from "../../assets/hero3.png";
+import recipeImageUrl from "../../assets/hero4.png";
+import logoUrl from "../../assets/1500_logo.png";
+import consistencyIconUrl from "../../assets/consistency.png";
+import fastIconUrl from "../../assets/fast.png";
+import targetIconUrl from "../../assets/target.png";
+
 const imageBaseUrl = "https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.dev/images";
 const contactHref = "mailto:nick@shedlab.studio?subject=Fifteen%20Hundred%20creator%20partnership";
 
 const imageUrl = (name: string) => `${imageBaseUrl}/${name}`;
-
-const heroImageUrl = imageUrl("hero1.png");
-const previewImageUrl = imageUrl("hero2.png");
-const planningImageUrl = imageUrl("hero3.png");
-const recipeImageUrl = imageUrl("hero4.png");
-const logoUrl = imageUrl("1500_logo.png");
-const consistencyIconUrl = imageUrl("consistency.png");
-const fastIconUrl = imageUrl("fast.png");
-const targetIconUrl = imageUrl("target.png");
 
 const features = [
   {
@@ -34,17 +34,17 @@ const previewCards = [
   {
     eyebrow: "Onboarding",
     title: "Set a daily target",
-    image: imageUrl("onboarding-preview.png"),
+    image: "/screenshots/onboarding-preview.png",
   },
   {
     eyebrow: "Timeline",
     title: "Meals stay organized",
-    image: imageUrl("meal-timeline-preview.png"),
+    image: "/screenshots/meal-timeline-preview.png",
   },
   {
     eyebrow: "Food cards",
     title: "Visual meal ideas",
-    image: imageUrl("food-card-preview.png"),
+    image: "/screenshots/food-card-preview.png",
   },
 ];
 
