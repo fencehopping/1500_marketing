@@ -864,6 +864,16 @@ h3 {
   gap: 4px;
 }
 
+.admin-app-select {
+  display: grid;
+  gap: 6px;
+  min-width: 170px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
 .admin-toolbar strong {
   font-size: 15px;
 }
@@ -910,7 +920,8 @@ h3 {
 
 .admin-page input[type="text"],
 .admin-page input[type="search"],
-.admin-page input[type="file"] {
+.admin-page input[type="file"],
+.admin-page select {
   width: 100%;
   min-height: 46px;
   border: 1px solid rgba(0, 0, 0, 0.1);
@@ -923,7 +934,8 @@ h3 {
 }
 
 .admin-page input[type="text"],
-.admin-page input[type="search"] {
+.admin-page input[type="search"],
+.admin-page select {
   padding: 0 14px;
 }
 
@@ -935,6 +947,10 @@ h3 {
   cursor: not-allowed;
   opacity: 0.48;
   transform: none;
+}
+
+.button-danger {
+  color: #b42318;
 }
 
 .image-list-header {

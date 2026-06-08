@@ -11,3 +11,14 @@ ALLOWED_ADMIN_EMAIL = "nickholroyd@gmail.com"
 ALLOWED_ORIGINS = "https://1500cal.app,http://localhost:5173"
 GOOGLE_CLIENT_ID = "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com"
 PUBLIC_IMAGES_BASE_URL = "https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.dev/images"
+PUBLIC_IMAGES_ROOT_URL = "https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.dev"
+
+# Optional per-app public URL overrides. Without these, non-1500 apps use
+# PUBLIC_IMAGES_ROOT_URL/<app-id>/images.
+JETSTREAM_PUBLIC_IMAGES_BASE_URL = "https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.dev/jetstream/images"
+DUXBEACH_PUBLIC_IMAGES_BASE_URL = "https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.dev/duxbeach/images"
+TICKTALK_PUBLIC_IMAGES_BASE_URL = "https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.dev/ticktalk/images"
+BUNKR_PUBLIC_IMAGES_BASE_URL = "https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.dev/bunkr/images"
+
+# Optional JSON override for app-level admins, bucket bindings, prefixes, and URLs.
+# ADMIN_APP_CONFIGS = "[{\"id\":\"jetstream\",\"allowedAdminEmails\":[\"admin@example.com\"],\"bucketBinding\":\"IMAGES_BUCKET\",\"r2Prefix\":\"jetstream/images/\"}]"

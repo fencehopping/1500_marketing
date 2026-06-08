@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { knownImageNames, publicImagesBaseUrl } from "./data/imageCatalog";
+import { adminApps, defaultAdminApp } from "./data/adminApps";
+import { knownImageNames } from "./data/imageCatalog";
 
 type GoogleCredentialResponse = {
   credential?: string;
@@ -39,7 +40,6 @@ declare global {
   }
 }
 
-const adminEmail = "nickholroyd@gmail.com";
 const googleClientId =
   import.meta.env.VITE_GOOGLE_CLIENT_ID ??
   "534108723063-jj1of74k1snce3e1e7ltahqknhnlsu11.apps.googleusercontent.com";
@@ -47,17 +47,10 @@ const adminApiBaseUrl =
   import.meta.env.VITE_ADMIN_API_BASE_URL ??
   "https://fifteenhundred-admin-api.fencehopping.workers.dev";
 
-const fallbackImages: ImageRecord[] = knownImageNames.map((name) => ({
-  key: `images/${name}.png`,
-  name,
-  keyword: name.replace(/-/g, " "),
-  url: `${publicImagesBaseUrl}/${name}.png`,
-  source: "catalog",
-}));
-
 export default function Admin() {
   const [credential, setCredential] = useState<string | null>(null);
   const [user, setUser] = useState<GoogleUser | null>(null);
+  const [selectedAppId, setSelectedAppId] = useState(defaultAdminApp.id);
   const [images, setImages] = useState<ImageRecord[]>([]);
   const [query, setQuery] = useState("");
   const [keyword, setKeyword] = useState("");
@@ -66,8 +59,23 @@ export default function Admin() {
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
 
-  const isAllowed = user?.email === adminEmail;
+  const selectedApp = adminApps.find((app) => app.id === selectedAppId) ?? defaultAdminApp;
+  const selectedAppRef = useRef(selectedApp);
+  const isAllowed = Boolean(user && selectedApp.allowedAdminEmails.includes(user.email));
   const canUseApi = Boolean(adminApiBaseUrl && credential && isAllowed);
+  const fallbackImages = useMemo(
+    () =>
+      selectedApp.id === "1500"
+        ? knownImageNames.map((name) => ({
+            key: `images/${name}.png`,
+            name,
+            keyword: name.replace(/-/g, " "),
+            url: `${selectedApp.publicImagesBaseUrl}/${name}.png`,
+            source: "catalog" as const,
+          }))
+        : [],
+    [selectedApp],
+  );
   const filteredImages = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     if (!normalizedQuery) {
@@ -81,6 +89,10 @@ export default function Admin() {
         .includes(normalizedQuery),
     );
   }, [images, query]);
+
+  useEffect(() => {
+    selectedAppRef.current = selectedApp;
+  }, [selectedApp]);
 
   useEffect(() => {
     if (!googleClientId) {
@@ -117,10 +129,12 @@ export default function Admin() {
   }, []);
 
   useEffect(() => {
+    setImages([]);
+    setQuery("");
     if (canUseApi) {
       void loadImages();
     }
-  }, [canUseApi]);
+  }, [canUseApi, selectedAppId]);
 
   function handleCredential(response: GoogleCredentialResponse) {
     if (!response.credential) {
@@ -132,12 +146,13 @@ export default function Admin() {
     setCredential(response.credential);
     setUser(decodedUser);
 
-    if (decodedUser.email !== adminEmail) {
-      setStatus(`Signed in as ${decodedUser.email}. Admin access is restricted to ${adminEmail}.`);
+    const credentialApp = selectedAppRef.current;
+    if (!credentialApp.allowedAdminEmails.includes(decodedUser.email)) {
+      setStatus(`Signed in as ${decodedUser.email}. Admin access is restricted for ${credentialApp.displayName}.`);
       return;
     }
 
-    setStatus("Signed in. Loading Cloudflare images.");
+    setStatus(`Signed in. Loading ${credentialApp.displayName} images.`);
   }
 
   async function loadImages() {
@@ -147,7 +162,7 @@ export default function Admin() {
 
     setIsLoading(true);
     try {
-      const response = await fetch(`${adminApiBaseUrl}/images`, {
+      const response = await fetch(`${adminApiBaseUrl}/images?appId=${encodeURIComponent(selectedApp.id)}`, {
         headers: {
           Authorization: `Bearer ${credential}`,
         },
@@ -164,11 +179,9 @@ export default function Admin() {
           source: "r2",
         })),
       );
-      setStatus(`Loaded ${data.images.length} images from Cloudflare R2.`);
+      setStatus(`Loaded ${data.images.length} ${selectedApp.displayName} images from Cloudflare R2.`);
     } catch (error) {
-      if (images.length === 0) {
-        setImages(fallbackImages);
-      }
+      setImages((currentImages) => (currentImages.length === 0 ? fallbackImages : currentImages));
       setStatus(error instanceof Error ? error.message : "Could not load Cloudflare images.");
     } finally {
       setIsLoading(false);
@@ -188,11 +201,12 @@ export default function Admin() {
 
     const body = new FormData();
     body.append("keyword", keyword);
+    body.append("appId", selectedApp.id);
     body.append("file", file);
 
     setIsUploading(true);
     try {
-      const response = await fetch(`${adminApiBaseUrl}/images`, {
+      const response = await fetch(`${adminApiBaseUrl}/images?appId=${encodeURIComponent(selectedApp.id)}`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${credential}`,
@@ -216,6 +230,49 @@ export default function Admin() {
     }
   }
 
+  async function deleteImage(image: ImageRecord) {
+    if (!adminApiBaseUrl || !credential || !isAllowed || image.source !== "r2") {
+      setStatus("Only Cloudflare R2 images can be deleted.");
+      return;
+    }
+
+    const confirmed = window.confirm(`Delete ${image.keyword}? This removes ${image.key} from R2.`);
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `${adminApiBaseUrl}/images?appId=${encodeURIComponent(selectedApp.id)}&key=${encodeURIComponent(image.key)}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${credential}`,
+          },
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      setImages((currentImages) => currentImages.filter((currentImage) => currentImage.key !== image.key));
+      setStatus(`Deleted ${image.name}.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Delete failed.");
+    }
+  }
+
+  function updateSelectedApp(appId: string) {
+    setSelectedAppId(appId);
+    const nextApp = adminApps.find((app) => app.id === appId) ?? defaultAdminApp;
+    if (user && !nextApp.allowedAdminEmails.includes(user.email)) {
+      setStatus(`Signed in as ${user.email}. Admin access is restricted for ${nextApp.displayName}.`);
+      return;
+    }
+    setStatus(`Switched to ${nextApp.displayName}.`);
+  }
+
   if (!isAllowed) {
     return (
       <main className="admin-page admin-login-page">
@@ -227,9 +284,19 @@ export default function Admin() {
             <strong>{user ? user.email : "Not signed in"}</strong>
             <span>{status}</span>
           </div>
+          <label className="admin-app-select">
+            App
+            <select value={selectedApp.id} onChange={(event) => updateSelectedApp(event.target.value)}>
+              {adminApps.map((app) => (
+                <option key={app.id} value={app.id}>
+                  {app.displayName}
+                </option>
+              ))}
+            </select>
+          </label>
           {!user ? <div id="googleSignIn" /> : null}
-          {user && user.email !== adminEmail ? (
-            <p className="admin-denied">Access is restricted to {adminEmail}.</p>
+          {user && !isAllowed ? (
+            <p className="admin-denied">Access is restricted for {selectedApp.displayName}.</p>
           ) : null}
           <a className="button button-secondary" href="/">
             Website
@@ -244,8 +311,8 @@ export default function Admin() {
       <header className="admin-header">
         <div>
           <p className="eyebrow">Admin</p>
-          <h1>Food image library</h1>
-          <p>Browse current Cloudflare images, search by keyword, and upload new keyword images.</p>
+          <h1>{selectedApp.id === "1500" ? "Food image library" : `${selectedApp.displayName} image library`}</h1>
+          <p>Browse current Cloudflare images, search by keyword, upload new keyword images, and remove old ones.</p>
         </div>
         <a className="button button-secondary" href="/">
           Website
@@ -257,6 +324,16 @@ export default function Admin() {
           <strong>{user ? user.email : "Not signed in"}</strong>
           <span>{status}</span>
         </div>
+        <label className="admin-app-select">
+          App
+          <select value={selectedApp.id} onChange={(event) => updateSelectedApp(event.target.value)}>
+            {adminApps.map((app) => (
+              <option key={app.id} value={app.id}>
+                {app.displayName}
+              </option>
+            ))}
+          </select>
+        </label>
         {user?.picture ? <img src={user.picture} alt="" /> : null}
         {!user ? <div id="googleSignIn" /> : null}
       </section>
@@ -321,6 +398,14 @@ export default function Admin() {
               <a className="button button-secondary" href={image.url} target="_blank" rel="noreferrer">
                 Open
               </a>
+              <button
+                className="button button-secondary button-danger"
+                type="button"
+                disabled={!canUseApi || image.source !== "r2"}
+                onClick={() => deleteImage(image)}
+              >
+                Delete
+              </button>
             </article>
           ))}
         </div>

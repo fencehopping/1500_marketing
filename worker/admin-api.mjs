@@ -1,5 +1,51 @@
-const allowedMethods = "GET,POST,OPTIONS";
+const allowedMethods = "GET,POST,DELETE,OPTIONS";
 const allowedHeaders = "Authorization,Content-Type";
+const defaultAdminEmail = "nickholroyd@gmail.com";
+const legacyPublicImagesBaseUrl = "https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.dev/images";
+
+const defaultApps = [
+  {
+    id: "1500",
+    displayName: "1500",
+    allowedAdminEmails: [defaultAdminEmail],
+    bucketBinding: "IMAGES_BUCKET",
+    r2Prefix: "images/",
+    publicImagesBaseUrlEnv: "PUBLIC_IMAGES_BASE_URL",
+    fallbackPublicImagesBaseUrl: legacyPublicImagesBaseUrl,
+  },
+  {
+    id: "jetstream",
+    displayName: "JetStream",
+    allowedAdminEmails: [defaultAdminEmail],
+    bucketBinding: "IMAGES_BUCKET",
+    r2Prefix: "jetstream/images/",
+    publicImagesBaseUrlEnv: "JETSTREAM_PUBLIC_IMAGES_BASE_URL",
+  },
+  {
+    id: "duxbeach",
+    displayName: "DuxBeach",
+    allowedAdminEmails: [defaultAdminEmail],
+    bucketBinding: "IMAGES_BUCKET",
+    r2Prefix: "duxbeach/images/",
+    publicImagesBaseUrlEnv: "DUXBEACH_PUBLIC_IMAGES_BASE_URL",
+  },
+  {
+    id: "ticktalk",
+    displayName: "TickTalk",
+    allowedAdminEmails: [defaultAdminEmail],
+    bucketBinding: "IMAGES_BUCKET",
+    r2Prefix: "ticktalk/images/",
+    publicImagesBaseUrlEnv: "TICKTALK_PUBLIC_IMAGES_BASE_URL",
+  },
+  {
+    id: "bunkr",
+    displayName: "Bunkr",
+    allowedAdminEmails: [defaultAdminEmail],
+    bucketBinding: "IMAGES_BUCKET",
+    r2Prefix: "bunkr/images/",
+    publicImagesBaseUrlEnv: "BUNKR_PUBLIC_IMAGES_BASE_URL",
+  },
+];
 
 export default {
   async fetch(request, env) {
@@ -17,17 +63,26 @@ export default {
       return json({ error: "Not found" }, 404, corsHeaders);
     }
 
-    const auth = await authorize(request, env);
+    const appResult = await resolveApp(request, env);
+    if (!appResult.ok) {
+      return json({ error: appResult.error }, appResult.status, corsHeaders);
+    }
+
+    const auth = await authorize(request, env, appResult.app);
     if (!auth.ok) {
       return json({ error: auth.error }, auth.status, corsHeaders);
     }
 
     if (request.method === "GET") {
-      return listImages(env, corsHeaders);
+      return listImages(env, corsHeaders, appResult.app);
     }
 
     if (request.method === "POST") {
-      return uploadImage(request, env, corsHeaders, auth.email);
+      return uploadImage(request, env, corsHeaders, auth.email, appResult.app);
+    }
+
+    if (request.method === "DELETE") {
+      return deleteImage(request, env, corsHeaders, appResult.app);
     }
 
     return json({ error: "Method not allowed" }, 405, {
@@ -37,17 +92,31 @@ export default {
   },
 };
 
-async function listImages(env, headers) {
-  const listed = await env.IMAGES_BUCKET.list({ prefix: "images/" });
-  const images = listed.objects
+async function listImages(env, headers, app) {
+  const bucket = bucketFor(env, app);
+  const objects = [];
+  let cursor;
+
+  do {
+    const listed = await bucket.list({
+      prefix: app.r2Prefix,
+      cursor,
+      limit: 1000,
+    });
+    objects.push(...listed.objects);
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor);
+
+  const images = objects
     .filter((object) => !object.key.endsWith("/"))
     .sort((a, b) => a.key.localeCompare(b.key))
-    .map((object) => toImageRecord(object, env));
+    .map((object) => toImageRecord(object, app));
 
   return json({ images }, 200, headers);
 }
 
-async function uploadImage(request, env, headers, email) {
+async function uploadImage(request, env, headers, email, app) {
+  const bucket = bucketFor(env, app);
   const form = await request.formData();
   const keyword = String(form.get("keyword") ?? "").trim();
   const file = form.get("file");
@@ -64,10 +133,10 @@ async function uploadImage(request, env, headers, email) {
 
   const extension = extensionFor(file);
   const name = slugify(keyword);
-  const key = `images/${name}.${extension}`;
+  const key = `${app.r2Prefix}${name}.${extension}`;
   const body = await file.arrayBuffer();
 
-  await env.IMAGES_BUCKET.put(key, body, {
+  await bucket.put(key, body, {
     httpMetadata: {
       contentType: file.type || `image/${extension}`,
       cacheControl: "public, max-age=31536000, immutable",
@@ -85,7 +154,7 @@ async function uploadImage(request, env, headers, email) {
         key,
         name,
         keyword,
-        url: `${env.PUBLIC_IMAGES_BASE_URL}/${name}.${extension}`,
+        url: `${app.publicImagesBaseUrl}/${name}.${extension}`,
         size: file.size,
         uploaded: new Date().toISOString(),
       },
@@ -95,7 +164,23 @@ async function uploadImage(request, env, headers, email) {
   );
 }
 
-async function authorize(request, env) {
+async function deleteImage(request, env, headers, app) {
+  const bucket = bucketFor(env, app);
+  const url = new URL(request.url);
+  const key = url.searchParams.get("key");
+
+  if (!key) {
+    return json({ error: "Image key is required." }, 400, headers);
+  }
+  if (!key.startsWith(app.r2Prefix) || key.endsWith("/")) {
+    return json({ error: "Image key is outside this app." }, 400, headers);
+  }
+
+  await bucket.delete(key);
+  return json({ ok: true, key }, 200, headers);
+}
+
+async function authorize(request, env, app) {
   const header = request.headers.get("Authorization") ?? "";
   const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
   if (!token) {
@@ -108,28 +193,112 @@ async function authorize(request, env) {
   }
 
   const payload = await response.json();
-  const allowedEmail = env.ALLOWED_ADMIN_EMAIL ?? "nickholroyd@gmail.com";
-  if (payload.email !== allowedEmail || payload.email_verified !== "true") {
-    return { ok: false, status: 403, error: "This Google account is not allowed." };
+  const email = String(payload.email ?? "");
+  if (!app.allowedAdminEmails.includes(email) || payload.email_verified !== "true") {
+    return { ok: false, status: 403, error: `This Google account is not allowed for ${app.displayName}.` };
   }
   if (env.GOOGLE_CLIENT_ID && payload.aud !== env.GOOGLE_CLIENT_ID) {
     return { ok: false, status: 403, error: "Google token audience does not match this app." };
   }
 
-  return { ok: true, email: payload.email };
+  return { ok: true, email };
 }
 
-function toImageRecord(object, env) {
+function toImageRecord(object, app) {
   const filename = object.key.split("/").pop() ?? object.key;
   const name = filename.replace(/\.[^.]+$/, "");
   return {
     key: object.key,
     name,
     keyword: object.customMetadata?.keyword ?? name.replaceAll("-", " "),
-    url: `${env.PUBLIC_IMAGES_BASE_URL}/${filename}`,
+    url: `${app.publicImagesBaseUrl}/${filename}`,
     size: object.size,
     uploaded: object.uploaded?.toISOString(),
   };
+}
+
+async function resolveApp(request, env) {
+  const url = new URL(request.url);
+  let appId = url.searchParams.get("appId")?.trim().toLowerCase();
+
+  if (!appId && request.method === "POST") {
+    const contentType = request.headers.get("Content-Type") ?? "";
+    if (!contentType.includes("multipart/form-data")) {
+      return { ok: false, status: 400, error: "Multipart form data is required." };
+    }
+    appId = "1500";
+  }
+
+  const app = appConfigs(env).find((candidate) => candidate.id === (appId || "1500"));
+  if (!app) {
+    return { ok: false, status: 404, error: "Unknown app." };
+  }
+  if (!bucketFor(env, app)) {
+    return { ok: false, status: 500, error: `Missing R2 bucket binding ${app.bucketBinding}.` };
+  }
+  if (!app.publicImagesBaseUrl) {
+    return { ok: false, status: 500, error: `Missing public images base URL for ${app.displayName}.` };
+  }
+
+  return { ok: true, app };
+}
+
+function appConfigs(env) {
+  const overrides = parseAppConfigOverrides(env.ADMIN_APP_CONFIGS);
+  const legacyAllowedAdminEmail = env.ALLOWED_ADMIN_EMAIL;
+
+  return defaultApps.map((app) => {
+    const override = overrides.find((candidate) => candidate.id === app.id) ?? {};
+    const publicImagesBaseUrl =
+      trimTrailingSlash(env[override.publicImagesBaseUrlEnv ?? app.publicImagesBaseUrlEnv]) ??
+      trimTrailingSlash(override.publicImagesBaseUrl) ??
+      trimTrailingSlash(app.fallbackPublicImagesBaseUrl) ??
+      buildPublicImagesBaseUrl(env.PUBLIC_IMAGES_ROOT_URL, override.r2Prefix ?? app.r2Prefix);
+
+    return {
+      ...app,
+      ...override,
+      id: app.id,
+      allowedAdminEmails:
+        override.allowedAdminEmails ??
+        (legacyAllowedAdminEmail ? [legacyAllowedAdminEmail] : app.allowedAdminEmails),
+      r2Prefix: normalizePrefix(override.r2Prefix ?? app.r2Prefix),
+      bucketBinding: override.bucketBinding ?? app.bucketBinding,
+      publicImagesBaseUrl,
+    };
+  });
+}
+
+function parseAppConfigOverrides(rawConfig) {
+  if (!rawConfig) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(rawConfig);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function bucketFor(env, app) {
+  return env[app.bucketBinding];
+}
+
+function buildPublicImagesBaseUrl(rootUrl, prefix) {
+  const cleanRoot = trimTrailingSlash(rootUrl);
+  if (!cleanRoot) {
+    return "";
+  }
+  return `${cleanRoot}/${prefix.replace(/\/$/, "")}`;
+}
+
+function normalizePrefix(prefix) {
+  return `${String(prefix ?? "").replace(/^\/+|\/+$/g, "")}/`;
+}
+
+function trimTrailingSlash(value) {
+  return typeof value === "string" && value ? value.replace(/\/+$/, "") : undefined;
 }
 
 function cors(request, env) {

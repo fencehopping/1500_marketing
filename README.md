@@ -17,7 +17,7 @@ Images are loaded from Cloudflare R2:
 
 The page is static and can be deployed to Vercel or Netlify with `npm run build`.
 
-## Admin image library
+## Multi-app admin image platform
 
 The admin UI is available at `/admin`.
 
@@ -27,15 +27,86 @@ Required Vite environment variables:
 VITE_GOOGLE_CLIENT_ID=YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com
 VITE_ADMIN_API_BASE_URL=https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev
 VITE_PUBLIC_IMAGES_BASE_URL=https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.dev/images
+VITE_PUBLIC_IMAGES_ROOT_URL=https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.dev
 ```
 
-The UI only unlocks write actions for `nickholroyd@gmail.com`.
+The Google sign-in gate remains in place. The app switcher currently supports:
+
+- `1500`
+- `jetstream`
+- `duxbeach`
+- `ticktalk`
+- `bunkr`
+
+By default, all apps allow `nickholroyd@gmail.com`. Override frontend app config with `VITE_ADMIN_APP_CONFIGS` when an app needs different admin emails, bucket bindings, prefixes, or public URLs:
+
+```bash
+VITE_ADMIN_APP_CONFIGS='[{"id":"jetstream","allowedAdminEmails":["admin@example.com"],"publicImagesBaseUrl":"https://pub.example.com/jetstream/images"}]'
+```
 
 ### Cloudflare Worker API
 
-The Worker in `worker/admin-api.mjs` handles secure R2 listing and uploads. It verifies the Google ID token server-side, then writes uploads to:
+The Worker in `worker/admin-api.mjs` handles secure R2 listing, uploads, and deletes. It verifies the Google ID token server-side, resolves the requested app, and validates that the signed-in email is allowed for that app.
 
-`images/<keyword-slug>.<ext>`
+API calls accept `appId` as a query parameter:
+
+```text
+GET /images?appId=jetstream
+POST /images?appId=jetstream
+DELETE /images?appId=jetstream&key=jetstream/images/example.png
+```
+
+For backward compatibility, missing `appId` defaults to `1500`.
+
+Storage paths:
+
+- 1500: `images/<keyword-slug>.<ext>`
+- New apps: `<app-id>/images/<keyword-slug>.<ext>`
+
+Default app config:
+
+| App | Display name | R2 prefix | Bucket binding | Public URL |
+| --- | --- | --- | --- | --- |
+| `1500` | 1500 | `images/` | `IMAGES_BUCKET` | `PUBLIC_IMAGES_BASE_URL` |
+| `jetstream` | JetStream | `jetstream/images/` | `IMAGES_BUCKET` | `JETSTREAM_PUBLIC_IMAGES_BASE_URL` or `PUBLIC_IMAGES_ROOT_URL/jetstream/images` |
+| `duxbeach` | DuxBeach | `duxbeach/images/` | `IMAGES_BUCKET` | `DUXBEACH_PUBLIC_IMAGES_BASE_URL` or `PUBLIC_IMAGES_ROOT_URL/duxbeach/images` |
+| `ticktalk` | TickTalk | `ticktalk/images/` | `IMAGES_BUCKET` | `TICKTALK_PUBLIC_IMAGES_BASE_URL` or `PUBLIC_IMAGES_ROOT_URL/ticktalk/images` |
+| `bunkr` | Bunkr | `bunkr/images/` | `IMAGES_BUCKET` | `BUNKR_PUBLIC_IMAGES_BASE_URL` or `PUBLIC_IMAGES_ROOT_URL/bunkr/images` |
+
+Worker variables:
+
+```toml
+[vars]
+ALLOWED_ADMIN_EMAIL = "nickholroyd@gmail.com"
+ALLOWED_ORIGINS = "https://1500cal.app,http://localhost:5173"
+GOOGLE_CLIENT_ID = "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com"
+PUBLIC_IMAGES_BASE_URL = "https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.dev/images"
+PUBLIC_IMAGES_ROOT_URL = "https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.dev"
+```
+
+Use `ADMIN_APP_CONFIGS` to override per-app allowed admin emails, bucket bindings, prefixes, or public image URLs:
+
+```toml
+ADMIN_APP_CONFIGS = "[{\"id\":\"jetstream\",\"allowedAdminEmails\":[\"admin@example.com\"],\"bucketBinding\":\"IMAGES_BUCKET\",\"r2Prefix\":\"jetstream/images/\"}]"
+```
+
+### Bulk image uploads
+
+For large batches, upload directly to the configured Cloudflare R2 bucket with Wrangler. Filenames become image keywords, so `grilled-chicken-breast.png` uploads to `images/grilled-chicken-breast.png`.
+
+Preview the upload plan:
+
+```bash
+npm run upload:images -- ../Images --dry-run
+```
+
+Upload the batch:
+
+```bash
+npm run upload:images -- ../Images
+```
+
+Use `--recursive` if the source directory has nested folders.
 
 Setup:
 
@@ -43,10 +114,12 @@ Setup:
 cp wrangler.toml.example wrangler.toml
 ```
 
-Then update `wrangler.toml` with the real R2 bucket name, Google OAuth client ID, and allowed origins.
+Then update `wrangler.toml` with the real R2 bucket name, Google OAuth client ID, allowed origins, and public image URLs.
 
 Deploy:
 
 ```bash
+npm run build
+node --check worker/admin-api.mjs
 npx wrangler deploy
 ```
