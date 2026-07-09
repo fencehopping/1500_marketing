@@ -332,6 +332,24 @@ export default function Admin() {
     }
   }
 
+  function exportImageList() {
+    if (images.length === 0) {
+      setStatus("Load images before exporting the list.");
+      return;
+    }
+
+    const columns = ["key", "name", "keyword", "url", "size", "uploaded", "source"];
+    const rows = images.map((image) =>
+      columns
+        .map((column) => csvCell(String(image[column as keyof ImageRecord] ?? "")))
+        .join(","),
+    );
+    const csv = `${columns.join(",")}\r\n${rows.join("\r\n")}\r\n`;
+    const filename = `${selectedApp.id}-image-list-${new Date().toISOString().slice(0, 10)}.csv`;
+    downloadTextFile(csv, filename, "text/csv;charset=utf-8");
+    setStatus(`Exported ${images.length} ${selectedApp.displayName} image records.`);
+  }
+
   function updateSelectedApp(appId: string) {
     setSelectedAppId(appId);
     setZipDownloadLink(null);
@@ -486,7 +504,7 @@ export default function Admin() {
         <div className="image-list-header">
           <div>
             <p className="eyebrow">Images</p>
-            <h2>{filteredImages.length} images</h2>
+            <h2>{query.trim() ? `${filteredImages.length} of ${images.length} images` : `${images.length} images`}</h2>
           </div>
           <div className="image-actions">
             <input
@@ -497,6 +515,9 @@ export default function Admin() {
             />
             <button className="button button-secondary" type="button" disabled={!canUseApi || isLoading} onClick={loadImages}>
               {isLoading ? "Refreshing..." : "Refresh"}
+            </button>
+            <button className="button button-secondary" type="button" disabled={images.length === 0} onClick={exportImageList}>
+              Export list
             </button>
           </div>
         </div>
@@ -535,4 +556,23 @@ function decodeGoogleUser(credential: string): GoogleUser {
   const paddedPayload = normalizedPayload.padEnd(normalizedPayload.length + ((4 - (normalizedPayload.length % 4)) % 4), "=");
   const decodedPayload = JSON.parse(window.atob(paddedPayload)) as GoogleUser;
   return decodedPayload;
+}
+
+function csvCell(value: string) {
+  if (!/[",\r\n]/.test(value)) {
+    return value;
+  }
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function downloadTextFile(content: string, filename: string, type: string) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
