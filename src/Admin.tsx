@@ -58,6 +58,9 @@ export default function Admin() {
   const [status, setStatus] = useState("Sign in with Google to manage Cloudflare images.");
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [isExportingTaxonomy, setIsExportingTaxonomy] = useState(false);
+  const [isGeneratingZipLink, setIsGeneratingZipLink] = useState(false);
+  const [zipDownloadLink, setZipDownloadLink] = useState<{ url: string; expiresAt: string; filename: string } | null>(null);
 
   const selectedApp = adminApps.find((app) => app.id === selectedAppId) ?? defaultAdminApp;
   const selectedAppRef = useRef(selectedApp);
@@ -131,6 +134,7 @@ export default function Admin() {
   useEffect(() => {
     setImages([]);
     setQuery("");
+    setZipDownloadLink(null);
     if (canUseApi) {
       void loadImages();
     }
@@ -263,8 +267,74 @@ export default function Admin() {
     }
   }
 
+  async function exportTaxonomyCsv() {
+    if (!adminApiBaseUrl || !credential || !isAllowed) {
+      setStatus("Sign in as the admin account before exporting taxonomy.");
+      return;
+    }
+
+    setIsExportingTaxonomy(true);
+    try {
+      const response = await fetch(`${adminApiBaseUrl}/admin/export/taxonomy.csv`, {
+        headers: {
+          Authorization: `Bearer ${credential}`,
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "prepper-taxonomy.csv";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setStatus("Exported prepper taxonomy CSV.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Taxonomy export failed.");
+    } finally {
+      setIsExportingTaxonomy(false);
+    }
+  }
+
+  async function generateZipDownloadLink() {
+    if (!adminApiBaseUrl || !credential || !isAllowed) {
+      setStatus("Sign in as the admin account before generating a download link.");
+      return;
+    }
+
+    setIsGeneratingZipLink(true);
+    setZipDownloadLink(null);
+    try {
+      const response = await fetch(`${adminApiBaseUrl}/admin/download-links?appId=${encodeURIComponent(selectedApp.id)}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${credential}`,
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      const data = (await response.json()) as { url: string; expiresAt: string; filename: string };
+      setZipDownloadLink(data);
+      setStatus("Generated a one-time zip download link. It expires in 1 hour and is consumed on first use.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not generate the zip download link.");
+    } finally {
+      setIsGeneratingZipLink(false);
+    }
+  }
+
   function updateSelectedApp(appId: string) {
     setSelectedAppId(appId);
+    setZipDownloadLink(null);
     const nextApp = adminApps.find((app) => app.id === appId) ?? defaultAdminApp;
     if (user && !nextApp.allowedAdminEmails.includes(user.email)) {
       setStatus(`Signed in as ${user.email}. Admin access is restricted for ${nextApp.displayName}.`);
@@ -336,6 +406,51 @@ export default function Admin() {
         </label>
         {user?.picture ? <img src={user.picture} alt="" /> : null}
         {!user ? <div id="googleSignIn" /> : null}
+      </section>
+
+      {selectedApp.id === "bunkr" ? (
+        <section className="admin-panel taxonomy-export-panel">
+          <div>
+            <p className="eyebrow">Taxonomy</p>
+            <h2>Export the full prepper taxonomy.</h2>
+          </div>
+          <button
+            className="button button-secondary"
+            type="button"
+            disabled={!canUseApi || isExportingTaxonomy}
+            onClick={exportTaxonomyCsv}
+          >
+            {isExportingTaxonomy ? "Exporting..." : "Export CSV"}
+          </button>
+        </section>
+      ) : null}
+
+      <section className="admin-panel zip-export-panel">
+        <div>
+          <p className="eyebrow">One-time download</p>
+          <h2>Generate a single-use zip link for all images.</h2>
+          {zipDownloadLink ? (
+            <p>
+              Expires {new Date(zipDownloadLink.expiresAt).toLocaleString()}. Opening the link downloads{" "}
+              {zipDownloadLink.filename} and consumes it.
+            </p>
+          ) : null}
+        </div>
+        <div className="zip-export-actions">
+          <button
+            className="button button-secondary"
+            type="button"
+            disabled={!canUseApi || isGeneratingZipLink}
+            onClick={generateZipDownloadLink}
+          >
+            {isGeneratingZipLink ? "Generating..." : "Generate zip link"}
+          </button>
+          {zipDownloadLink ? (
+            <a className="button button-primary" href={zipDownloadLink.url}>
+              Download zip
+            </a>
+          ) : null}
+        </div>
       </section>
 
       <section className="admin-panel upload-panel">

@@ -2,6 +2,28 @@ const allowedMethods = "GET,POST,DELETE,OPTIONS";
 const allowedHeaders = "Authorization,Content-Type";
 const defaultAdminEmail = "nickholroyd@gmail.com";
 const legacyPublicImagesBaseUrl = "https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.dev/images";
+const taxonomyExportPath = "/admin/export/taxonomy.csv";
+const taxonomyCsvFilename = "prepper-taxonomy.csv";
+const downloadLinksPath = "/admin/download-links";
+const imageZipDownloadPath = "/admin/download/images.zip";
+const downloadTokenPrefix = "_admin/download-tokens/";
+const downloadTokenTtlSeconds = 60 * 60;
+const taxonomyCsvColumns = [
+  "id",
+  "slug",
+  "title",
+  "parent_id",
+  "parent_slug",
+  "level",
+  "sort_order",
+  "description",
+  "icon_asset_id",
+  "image_asset_id",
+  "affiliate_query",
+  "is_active",
+  "created_at",
+  "updated_at",
+];
 
 const defaultApps = [
   {
@@ -59,6 +81,36 @@ export default {
     }
 
     const url = new URL(request.url);
+    if (url.pathname === taxonomyExportPath) {
+      if (request.method !== "GET") {
+        return json({ error: "Method not allowed" }, 405, {
+          ...corsHeaders,
+          Allow: "GET,OPTIONS",
+        });
+      }
+      return exportTaxonomyCsv(request, env, corsHeaders);
+    }
+
+    if (url.pathname === downloadLinksPath) {
+      if (request.method !== "POST") {
+        return json({ error: "Method not allowed" }, 405, {
+          ...corsHeaders,
+          Allow: "POST,OPTIONS",
+        });
+      }
+      return createImageZipDownloadLink(request, env, corsHeaders);
+    }
+
+    if (url.pathname === imageZipDownloadPath) {
+      if (request.method !== "GET") {
+        return json({ error: "Method not allowed" }, 405, {
+          ...corsHeaders,
+          Allow: "GET,OPTIONS",
+        });
+      }
+      return downloadImageZip(request, env, corsHeaders);
+    }
+
     if (url.pathname !== "/images") {
       return json({ error: "Not found" }, 404, corsHeaders);
     }
@@ -180,6 +232,380 @@ async function deleteImage(request, env, headers, app) {
   return json({ ok: true, key }, 200, headers);
 }
 
+async function createImageZipDownloadLink(request, env, headers) {
+  const appResult = await resolveApp(request, env);
+  if (!appResult.ok) {
+    return json({ error: appResult.error }, appResult.status, headers);
+  }
+
+  const auth = await authorize(request, env, appResult.app);
+  if (!auth.ok) {
+    return json({ error: auth.error }, auth.status, headers);
+  }
+
+  const bucket = bucketFor(env, appResult.app);
+  const token = await randomToken();
+  const expiresAt = new Date(Date.now() + downloadTokenTtlSeconds * 1000).toISOString();
+  const tokenRecord = {
+    appId: appResult.app.id,
+    createdBy: auth.email,
+    createdAt: new Date().toISOString(),
+    expiresAt,
+  };
+
+  await bucket.put(downloadTokenKey(token), JSON.stringify(tokenRecord), {
+    httpMetadata: {
+      contentType: "application/json; charset=utf-8",
+      cacheControl: "no-store",
+    },
+  });
+
+  const url = new URL(request.url);
+  url.pathname = imageZipDownloadPath;
+  url.search = "";
+  url.searchParams.set("appId", appResult.app.id);
+  url.searchParams.set("token", token);
+
+  return json(
+    {
+      url: url.toString(),
+      expiresAt,
+      filename: imageZipFilename(appResult.app),
+    },
+    201,
+    headers,
+  );
+}
+
+async function downloadImageZip(request, env, headers) {
+  const appResult = await resolveApp(request, env);
+  if (!appResult.ok) {
+    return json({ error: appResult.error }, appResult.status, headers);
+  }
+
+  const url = new URL(request.url);
+  const token = url.searchParams.get("token") ?? "";
+  if (!/^[a-zA-Z0-9_-]{24,}$/.test(token)) {
+    return json({ error: "Invalid download token." }, 400, headers);
+  }
+
+  const bucket = bucketFor(env, appResult.app);
+  const key = downloadTokenKey(token);
+  const tokenObject = await bucket.get(key);
+  if (!tokenObject) {
+    return json({ error: "This download link has already been used or does not exist." }, 410, headers);
+  }
+
+  let tokenRecord;
+  try {
+    tokenRecord = JSON.parse(await tokenObject.text());
+  } catch {
+    await bucket.delete(key);
+    return json({ error: "Invalid download token." }, 400, headers);
+  }
+
+  await bucket.delete(key);
+
+  if (tokenRecord.appId !== appResult.app.id) {
+    return json({ error: "This download link is for a different app." }, 403, headers);
+  }
+  if (Date.parse(tokenRecord.expiresAt) <= Date.now()) {
+    return json({ error: "This download link has expired." }, 410, headers);
+  }
+
+  const objects = await listImageObjects(bucket, appResult.app);
+  const zip = await buildZip(bucket, objects, appResult.app);
+
+  return new Response(zip, {
+    status: 200,
+    headers: {
+      ...headers,
+      "Content-Type": "application/zip",
+      "Content-Disposition": `attachment; filename="${imageZipFilename(appResult.app)}"`,
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+async function exportTaxonomyCsv(request, env, headers) {
+  const app = adminAuthApp(env, "bunkr");
+  const auth = await authorize(request, env, app);
+  if (!auth.ok) {
+    return json({ error: auth.error }, auth.status, headers);
+  }
+
+  try {
+    const rows = await loadTaxonomyRows(env);
+    const orderedRows = browseOrderedTaxonomyRows(rows);
+    const csv = taxonomyRowsToCsv(orderedRows, env);
+
+    return new Response(csv, {
+      status: 200,
+      headers: {
+        ...headers,
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${taxonomyCsvFilename}"`,
+        "Cache-Control": "no-store",
+      },
+    });
+  } catch (error) {
+    return json(
+      { error: error instanceof Error ? error.message : "Could not export taxonomy." },
+      500,
+      headers,
+    );
+  }
+}
+
+async function listImageObjects(bucket, app) {
+  const objects = [];
+  let cursor;
+
+  do {
+    const listed = await bucket.list({
+      prefix: app.r2Prefix,
+      cursor,
+      limit: 1000,
+    });
+    objects.push(...listed.objects.filter((object) => !object.key.endsWith("/")));
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor);
+
+  return objects.sort((a, b) => a.key.localeCompare(b.key));
+}
+
+async function buildZip(bucket, objects, app) {
+  const chunks = [];
+  const centralDirectory = [];
+  let offset = 0;
+
+  for (const object of objects) {
+    const storedObject = await bucket.get(object.key);
+    if (!storedObject) {
+      continue;
+    }
+
+    const body = new Uint8Array(await storedObject.arrayBuffer());
+    const filename = zipEntryFilename(object.key, app);
+    const filenameBytes = new TextEncoder().encode(filename);
+    const crc = crc32(body);
+    const localHeader = zipLocalHeader(filenameBytes, crc, body.length);
+    chunks.push(localHeader, body);
+    centralDirectory.push(zipCentralDirectoryHeader(filenameBytes, crc, body.length, offset));
+    offset += localHeader.length + body.length;
+  }
+
+  const centralDirectoryOffset = offset;
+  for (const entry of centralDirectory) {
+    chunks.push(entry);
+    offset += entry.length;
+  }
+
+  chunks.push(zipEndOfCentralDirectory(centralDirectory.length, offset - centralDirectoryOffset, centralDirectoryOffset));
+
+  const zip = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
+  let cursor = 0;
+  for (const chunk of chunks) {
+    zip.set(chunk, cursor);
+    cursor += chunk.length;
+  }
+
+  return zip;
+}
+
+async function loadTaxonomyRows(env) {
+  const supabaseURL = trimTrailingSlash(env.SUPABASE_URL ?? env.SUPABASE_PROJECT_URL);
+  const apiKey = env.SUPABASE_SERVICE_ROLE_KEY ?? env.SUPABASE_ANON_KEY ?? env.SUPABASE_PUBLIC_ANON_KEY;
+  const tableName = env.TAXONOMY_TABLE_NAME ?? env.SUPABASE_TAXONOMY_TABLE ?? "prep_taxonomy";
+
+  if (!supabaseURL) {
+    throw new Error("Missing SUPABASE_URL for taxonomy export.");
+  }
+  if (!apiKey) {
+    throw new Error("Missing Supabase API key for taxonomy export.");
+  }
+
+  const rows = [];
+  const pageSize = 1000;
+  let offset = 0;
+
+  while (true) {
+    const url = new URL(`${supabaseURL}/rest/v1/${encodeURIComponent(tableName)}`);
+    url.searchParams.set("select", "*");
+    url.searchParams.set("limit", String(pageSize));
+    url.searchParams.set("offset", String(offset));
+
+    const response = await fetch(url.toString(), {
+      headers: {
+        apikey: apiKey,
+        Authorization: `Bearer ${apiKey}`,
+        Accept: "application/json",
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Could not load taxonomy rows: ${await response.text()}`);
+    }
+
+    const page = await response.json();
+    if (!Array.isArray(page)) {
+      throw new Error("Supabase taxonomy response was not an array.");
+    }
+
+    rows.push(...page);
+    if (page.length < pageSize) {
+      break;
+    }
+    offset += pageSize;
+  }
+
+  return rows;
+}
+
+function browseOrderedTaxonomyRows(rows) {
+  const normalizedRows = rows.map(normalizeTaxonomyRow);
+  const byParentId = new Map();
+
+  for (const row of normalizedRows) {
+    const parentId = nullableString(row.parent_id);
+    const siblings = byParentId.get(parentId) ?? [];
+    siblings.push(row);
+    byParentId.set(parentId, siblings);
+  }
+
+  for (const siblings of byParentId.values()) {
+    siblings.sort(compareTaxonomyRows);
+  }
+
+  const ordered = [];
+  const visited = new Set();
+
+  function visit(parentId) {
+    const siblings = byParentId.get(parentId) ?? [];
+    for (const row of siblings) {
+      if (visited.has(row.id)) {
+        continue;
+      }
+      visited.add(row.id);
+      ordered.push(row);
+      visit(row.id);
+    }
+  }
+
+  visit(null);
+
+  if (ordered.length < normalizedRows.length) {
+    const remaining = normalizedRows.filter((row) => !visited.has(row.id)).sort(compareTaxonomyRows);
+    for (const row of remaining) {
+      if (visited.has(row.id)) {
+        continue;
+      }
+      visited.add(row.id);
+      ordered.push(row);
+      visit(row.id);
+    }
+  }
+
+  const byId = new Map(ordered.map((row) => [row.id, row]));
+  return ordered.map((row) => ({
+    ...row,
+    parent_slug: nullableString(row.parent_slug) ?? byId.get(nullableString(row.parent_id))?.slug ?? "",
+  }));
+}
+
+function normalizeTaxonomyRow(row) {
+  const slug = valueFor(row, ["slug"]) || slugify(valueFor(row, ["title", "name", "label"]));
+  const id = valueFor(row, ["id"]) || slug;
+  const title = valueFor(row, ["title", "name", "label"]);
+  const parentId = nullableString(valueFor(row, ["parent_id", "parentId"]));
+  const levelValue = valueFor(row, ["level"]);
+  const sortOrderValue = valueFor(row, ["sort_order", "sortOrder", "position", "display_order"]);
+
+  return {
+    id,
+    slug,
+    title,
+    parent_id: parentId ?? "",
+    parent_slug: valueFor(row, ["parent_slug", "parentSlug"]),
+    level: levelValue === "" ? "" : String(levelValue),
+    sort_order: sortOrderValue === "" ? "" : String(sortOrderValue),
+    description: valueFor(row, ["description"]),
+    icon_asset_id: valueFor(row, ["icon_asset_id", "iconAssetId", "icon_key", "iconKey"]),
+    image_asset_id: valueFor(row, ["image_asset_id", "imageAssetId", "image_key", "imageKey"]),
+    affiliate_query: valueFor(row, ["affiliate_query", "affiliateQuery"]),
+    is_active: booleanString(valueFor(row, ["is_active", "isActive"], true)),
+    created_at: valueFor(row, ["created_at", "createdAt"]),
+    updated_at: valueFor(row, ["updated_at", "updatedAt"]),
+  };
+}
+
+function taxonomyRowsToCsv(rows, env = {}) {
+  const lines = [
+    taxonomyCsvColumns.join(","),
+    ...rows.map((row) => taxonomyCsvColumns.map((column) => csvCell(row[column])).join(",")),
+  ];
+  const body = lines.join("\r\n") + "\r\n";
+  return env.TAXONOMY_CSV_UTF8_BOM === "true" ? `\uFEFF${body}` : body;
+}
+
+function csvCell(value) {
+  const stringValue = value == null ? "" : String(value);
+  if (!/[",\r\n]/.test(stringValue)) {
+    return stringValue;
+  }
+  return `"${stringValue.replace(/"/g, '""')}"`;
+}
+
+function compareTaxonomyRows(a, b) {
+  return (
+    compareSortOrder(a.sort_order, b.sort_order) ||
+    String(a.title).localeCompare(String(b.title), "en", { sensitivity: "base" }) ||
+    String(a.slug).localeCompare(String(b.slug), "en", { sensitivity: "base" }) ||
+    String(a.id).localeCompare(String(b.id), "en", { sensitivity: "base" })
+  );
+}
+
+function compareSortOrder(left, right) {
+  const leftNumber = Number(left);
+  const rightNumber = Number(right);
+  const leftValid = Number.isFinite(leftNumber);
+  const rightValid = Number.isFinite(rightNumber);
+  if (leftValid && rightValid && leftNumber !== rightNumber) {
+    return leftNumber - rightNumber;
+  }
+  if (leftValid !== rightValid) {
+    return leftValid ? -1 : 1;
+  }
+  return 0;
+}
+
+function valueFor(row, keys, fallback = "") {
+  for (const key of keys) {
+    if (row[key] !== undefined && row[key] !== null) {
+      return row[key];
+    }
+  }
+  return fallback;
+}
+
+function nullableString(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  const stringValue = String(value).trim();
+  return stringValue ? stringValue : null;
+}
+
+function booleanString(value) {
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  if (value === undefined || value === null || value === "") {
+    return "";
+  }
+  return String(value);
+}
+
 async function authorize(request, env, app) {
   const header = request.headers.get("Authorization") ?? "";
   const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
@@ -285,6 +711,15 @@ function bucketFor(env, app) {
   return env[app.bucketBinding];
 }
 
+function adminAuthApp(env, appId) {
+  const app = appConfigs(env).find((candidate) => candidate.id === appId) ?? defaultApps[0];
+  const legacyAllowedAdminEmail = env.ALLOWED_ADMIN_EMAIL;
+  return {
+    ...app,
+    allowedAdminEmails: legacyAllowedAdminEmail ? [legacyAllowedAdminEmail] : app.allowedAdminEmails,
+  };
+}
+
 function buildPublicImagesBaseUrl(rootUrl, prefix) {
   const cleanRoot = trimTrailingSlash(rootUrl);
   if (!cleanRoot) {
@@ -327,6 +762,101 @@ function json(value, status, headers = {}) {
     },
   });
 }
+
+async function randomToken() {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function downloadTokenKey(token) {
+  return `${downloadTokenPrefix}${token}.json`;
+}
+
+function imageZipFilename(app) {
+  return `${slugify(app.displayName || app.id)}-images.zip`;
+}
+
+function zipEntryFilename(key, app) {
+  const filename = key.slice(app.r2Prefix.length).replace(/^\/+/, "");
+  return filename || key.split("/").pop() || "image";
+}
+
+function zipLocalHeader(filenameBytes, crc, size) {
+  const header = new Uint8Array(30 + filenameBytes.length);
+  const view = new DataView(header.buffer);
+  view.setUint32(0, 0x04034b50, true);
+  view.setUint16(4, 20, true);
+  view.setUint16(6, 0x0800, true);
+  view.setUint16(8, 0, true);
+  view.setUint16(10, 0, true);
+  view.setUint16(12, 0, true);
+  view.setUint32(14, crc, true);
+  view.setUint32(18, size, true);
+  view.setUint32(22, size, true);
+  view.setUint16(26, filenameBytes.length, true);
+  view.setUint16(28, 0, true);
+  header.set(filenameBytes, 30);
+  return header;
+}
+
+function zipCentralDirectoryHeader(filenameBytes, crc, size, offset) {
+  const header = new Uint8Array(46 + filenameBytes.length);
+  const view = new DataView(header.buffer);
+  view.setUint32(0, 0x02014b50, true);
+  view.setUint16(4, 20, true);
+  view.setUint16(6, 20, true);
+  view.setUint16(8, 0x0800, true);
+  view.setUint16(10, 0, true);
+  view.setUint16(12, 0, true);
+  view.setUint16(14, 0, true);
+  view.setUint32(16, crc, true);
+  view.setUint32(20, size, true);
+  view.setUint32(24, size, true);
+  view.setUint16(28, filenameBytes.length, true);
+  view.setUint16(30, 0, true);
+  view.setUint16(32, 0, true);
+  view.setUint16(34, 0, true);
+  view.setUint16(36, 0, true);
+  view.setUint32(38, 0, true);
+  view.setUint32(42, offset, true);
+  header.set(filenameBytes, 46);
+  return header;
+}
+
+function zipEndOfCentralDirectory(entryCount, centralDirectorySize, centralDirectoryOffset) {
+  const header = new Uint8Array(22);
+  const view = new DataView(header.buffer);
+  view.setUint32(0, 0x06054b50, true);
+  view.setUint16(4, 0, true);
+  view.setUint16(6, 0, true);
+  view.setUint16(8, entryCount, true);
+  view.setUint16(10, entryCount, true);
+  view.setUint32(12, centralDirectorySize, true);
+  view.setUint32(16, centralDirectoryOffset, true);
+  view.setUint16(20, 0, true);
+  return header;
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc = crc32Table[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+const crc32Table = (() => {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < table.length; index += 1) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    }
+    table[index] = value >>> 0;
+  }
+  return table;
+})();
 
 function extensionFor(file) {
   if (file.type === "image/png") return "png";
