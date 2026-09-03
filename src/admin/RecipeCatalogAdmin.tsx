@@ -124,6 +124,11 @@ type Props = {
   onStatus: (message: string) => void;
 };
 
+type ActionFeedback = {
+  kind: "error" | "success";
+  message: string;
+};
+
 const mealTypes = ["breakfast", "lunch", "dinner", "snack"];
 const advancedNutritionFields = [
   { key: "addedSugarPerServing", label: "Added sugar g" },
@@ -161,6 +166,7 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
   const [optimizationCategory, setOptimizationCategory] = useState("all");
   const [hasMore, setHasMore] = useState(false);
   const [busy, setBusy] = useState<"load" | "source" | "save" | "tags" | "image" | "optimization" | "filters" | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<ActionFeedback | null>(null);
 
   const groupedTags = useMemo(() => {
     const groups = new Map<string, CatalogTag[]>();
@@ -175,6 +181,7 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
 
   const optimizationCategories = useMemo(() => [...new Set(optimizationFilters.map((filter) => filter.category))], [optimizationFilters]);
   const scoresByFilter = useMemo(() => new Map(optimizationScores.map((score) => [score.filterID, score])), [optimizationScores]);
+  const publishIssues = useMemo(() => publicationIssues(draft), [draft]);
 
   useEffect(() => {
     if (enabled) void Promise.all([loadRecipes(), loadTags(), loadOptimizationFilters()]);
@@ -249,6 +256,7 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
     setDraft(structuredClone(recipe));
     setSelectedTags(new Set(recipe.tags.map((tag) => tag.slug)));
     setSourceInput("");
+    setActionFeedback(null);
     void loadOptimizationScores(recipe.id);
   }
 
@@ -352,6 +360,13 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
   }
 
   async function save(nextStatus: CatalogRecipe["status"] = draft.status) {
+    if (nextStatus === "published" && publishIssues.length > 0) {
+      const requirementCount = publishIssues.length;
+      const feedback = `${requirementCount} publish ${requirementCount === 1 ? "requirement is" : "requirements are"} still incomplete. Review the checklist beside the Publish button.`;
+      setActionFeedback({ kind: "error", message: feedback });
+      onStatus(feedback);
+      return null;
+    }
     setBusy("save");
     try {
       const body = JSON.stringify({ ...draft, status: nextStatus, expectedVersion: draft.version });
@@ -361,10 +376,16 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
       setDraft(data.recipe);
       setSelectedTags(new Set(data.recipe.tags.map((tag) => tag.slug)));
       setRecipes((current) => [data.recipe, ...current.filter((item) => item.id !== data.recipe.id)]);
-      onStatus(`${data.recipe.title} saved as ${data.recipe.status}.`);
+      const feedback = data.recipe.status === "published"
+        ? `${data.recipe.title} is published and available to the meal generator.`
+        : `${data.recipe.title} saved as ${data.recipe.status}.`;
+      setActionFeedback({ kind: "success", message: feedback });
+      onStatus(feedback);
       return data.recipe;
     } catch (error) {
-      onStatus(message(error));
+      const feedback = message(error);
+      setActionFeedback({ kind: "error", message: feedback });
+      onStatus(feedback);
       return null;
     } finally {
       setBusy(null);
@@ -447,7 +468,7 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
           <p className="admin-panel-description">Import, generate, tag, review, and publish recipes for meal generation.</p>
         </div>
         <div className="image-actions">
-          <button className="button button-secondary" type="button" onClick={() => { setDraft(emptyRecipe()); setSelectedTags(new Set()); }}>New recipe</button>
+          <button className="button button-secondary" type="button" onClick={() => { setDraft(emptyRecipe()); setSelectedTags(new Set()); setActionFeedback(null); }}>New recipe</button>
           <button className="button button-secondary" type="button" disabled={busy === "load"} onClick={() => loadRecipes()}>Refresh</button>
         </div>
       </div>
@@ -566,7 +587,14 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
             </div>
           </section>
 
-          <div className="recipe-editor-actions"><button className="button button-secondary" type="button" disabled={busy === "save"} onClick={() => save("draft")}>Save draft</button>{draft.id && draft.status !== "archived" ? <button className="button button-secondary button-danger" type="button" disabled={busy === "save"} onClick={() => save("archived")}>Archive</button> : null}<button className="button button-primary" type="button" disabled={busy === "save"} onClick={() => save("published")}>{busy === "save" ? "Saving…" : "Publish"}</button></div>
+          <div className="recipe-publish-dock">
+            <div className={`recipe-publish-readiness ${publishIssues.length ? "is-blocked" : "is-ready"}`}>
+              <strong>{publishIssues.length ? `${publishIssues.length} ${publishIssues.length === 1 ? "requirement" : "requirements"} before publishing` : "Ready to publish"}</strong>
+              {publishIssues.length ? <ul>{publishIssues.map((issue) => <li key={issue}>{issue}</li>)}</ul> : <span>Publishing will make this recipe available to the meal generator.</span>}
+            </div>
+            {actionFeedback ? <p className={`recipe-action-feedback is-${actionFeedback.kind}`} role={actionFeedback.kind === "error" ? "alert" : "status"}>{actionFeedback.message}</p> : null}
+            <div className="recipe-editor-actions"><button className="button button-secondary" type="button" disabled={busy === "save"} onClick={() => save("draft")}>Save draft</button>{draft.id && draft.status !== "archived" ? <button className="button button-secondary button-danger" type="button" disabled={busy === "save"} onClick={() => save("archived")}>Archive</button> : null}<button className="button button-primary" type="button" disabled={busy === "save"} onClick={() => save("published")}>{busy === "save" ? "Saving…" : "Publish"}</button></div>
+          </div>
         </div>
       </div>
     </section>
@@ -598,5 +626,16 @@ function parseIngredients(value: string): Ingredient[] { return value.split("\n"
 function parseInstructions(value: string): Instruction[] { return value.split("\n").map((text) => ({ text })); }
 function sourcePlaceholder(mode: "url" | "text" | "ai") { return mode === "url" ? "https://example.com/recipe" : mode === "text" ? "Paste ingredients, instructions, notes, or recipe copy…" : "A high-protein weeknight dinner under 500 calories with Mediterranean flavors…"; }
 function message(error: unknown) { return error instanceof Error ? error.message : "The recipe request failed."; }
+function publicationIssues(recipe: CatalogRecipe) {
+  const issues: string[] = [];
+  if (recipe.rightsStatus === "pending") issues.push("Choose a reviewed rights status.");
+  if (recipe.mealTypes.length === 0) issues.push("Select at least one meal type.");
+  if (!recipe.ingredients.some((ingredient) => ingredient.text.trim())) issues.push("Add at least one ingredient.");
+  if (!recipe.instructions.some((instruction) => instruction.text.trim())) issues.push("Add at least one instruction.");
+  if (recipe.caloriesPerServing <= 0) issues.push("Add calories per serving.");
+  if (recipe.taggingStatus !== "ready") issues.push("Review the suggested classification, then pin the selection.");
+  if (!recipe.imageURL?.trim()) issues.push("Add or generate a recipe image.");
+  return issues;
+}
 function macroLabel(key: string) { return ({ caloriesPerServing: "Calories", proteinPerServing: "Protein g", carbsPerServing: "Carbs g", fiberPerServing: "Fiber g", sugarPerServing: "Sugar g", fatPerServing: "Fat g" } as Record<string, string>)[key]; }
 function optimizationCategoryLabel(category: string) { return category.split("_").map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" & "); }
