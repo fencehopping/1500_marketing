@@ -1,3 +1,5 @@
+import { scoreRecipeAgainstFilters } from "./recipe-optimization.mjs";
+
 const allowedMethods = "GET,POST,PATCH,PUT,DELETE,OPTIONS";
 const allowedHeaders = "Authorization,Content-Type";
 const defaultAdminEmail = "nickholroyd@gmail.com";
@@ -9,7 +11,10 @@ const aiFoodCatalogExportPath = "/admin/export/ai-food-catalog.csv";
 const aiFoodCatalogCsvFilename = "1500-ai-food-catalog.csv";
 const catalogRecipesPath = "/admin/catalog/recipes";
 const catalogTagsPath = "/admin/catalog/tags";
+const catalogOptimizationFiltersPath = "/admin/catalog/filters";
 const catalogRecipeGeneratePath = "/admin/catalog/recipes/generate";
+const publicRecipeFiltersPath = "/recipe-filters";
+const publicRecipesPath = "/recipes";
 const catalogTaggingPromptVersion = "catalog-tags-v1";
 const downloadLinksPath = "/admin/download-links";
 const imageZipDownloadPath = "/admin/download/images.zip";
@@ -204,6 +209,23 @@ export default {
     }
 
     if (
+      url.pathname === catalogOptimizationFiltersPath
+      || url.pathname.startsWith(`${catalogOptimizationFiltersPath}/`)
+    ) {
+      return handleOptimizationFilters(request, env, corsHeaders, url);
+    }
+
+    if (url.pathname === publicRecipeFiltersPath) {
+      if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { ...corsHeaders, Allow: "GET,OPTIONS" });
+      return listPublicRecipeFilters(env, corsHeaders);
+    }
+
+    if (url.pathname === publicRecipesPath || url.pathname.startsWith(`${publicRecipesPath}/`)) {
+      if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { ...corsHeaders, Allow: "GET,OPTIONS" });
+      return handlePublicOptimizedRecipes(env, corsHeaders, url);
+    }
+
+    if (
       url.pathname === catalogRecipesPath
       || url.pathname.startsWith(`${catalogRecipesPath}/`)
     ) {
@@ -284,7 +306,10 @@ export default {
     });
   },
   async scheduled(_controller, env, ctx) {
-    ctx.waitUntil(classifyPendingAccountCatalogRecipes(env));
+    ctx.waitUntil(Promise.all([
+      classifyPendingAccountCatalogRecipes(env),
+      scorePendingCatalogRecipes(env),
+    ]));
   },
 };
 
@@ -305,6 +330,29 @@ async function classifyPendingAccountCatalogRecipes(env, maximumRecipes = 10) {
       results.push({ id: recipe.id, ok: response.ok, status: response.status });
     } catch {
       results.push({ id: recipe.id, ok: false, status: 500 });
+    }
+  }
+  return results;
+}
+
+async function scorePendingCatalogRecipes(env, maximumRecipes = 10) {
+  const recipes = await catalogRestJSON(env, "catalog_recipes", {
+    search: new URLSearchParams({
+      select: "*",
+      optimization_status: "eq.pending",
+      status: "neq.archived",
+      order: "updated_at.asc",
+      limit: String(Math.max(1, Math.min(25, maximumRecipes))),
+    }),
+  });
+  const results = [];
+  for (const recipe of recipes) {
+    try {
+      const scores = await calculateAndPersistRecipeScores(env, recipe);
+      results.push({ id: recipe.id, ok: true, scores: scores.length });
+    } catch {
+      await markRecipeOptimizationFailed(env, recipe.id);
+      results.push({ id: recipe.id, ok: false, scores: 0 });
     }
   }
   return results;
@@ -339,6 +387,15 @@ async function handleCatalogRecipes(request, env, headers, url) {
     }
     if (segments.length === 2 && segments[1] === "classify" && request.method === "POST") {
       return await classifyCatalogRecipe(env, headers, recipeID);
+    }
+    if (segments.length === 2 && segments[1] === "optimization" && request.method === "GET") {
+      return await getRecipeOptimizationScores(env, headers, recipeID);
+    }
+    if (segments.length === 2 && segments[1] === "optimization" && request.method === "POST") {
+      return await recalculateRecipeOptimization(env, headers, recipeID);
+    }
+    if (segments.length === 4 && segments[1] === "optimization" && segments[3] === "override" && ["PUT", "DELETE"].includes(request.method)) {
+      return await setRecipeOptimizationOverride(request, env, headers, recipeID, segments[2], auth.email);
     }
     if (segments.length === 2 && segments[1] === "image" && request.method === "POST") {
       return await generateCatalogRecipeImage(env, headers, recipeID);
@@ -508,6 +565,209 @@ async function listCatalogTags(request, env, headers) {
   } catch (error) {
     return catalogErrorResponse(error, headers);
   }
+}
+
+async function handleOptimizationFilters(request, env, headers, url) {
+  const auth = await authorize(request, env, adminAuthApp(env, "1500"));
+  if (!auth.ok) return json({ error: auth.error }, auth.status, headers);
+  const suffix = url.pathname.slice(catalogOptimizationFiltersPath.length).replace(/^\/+|\/+$/g, "");
+  try {
+    if (!suffix && request.method === "GET") {
+      const filters = await loadOptimizationFilters(env);
+      return json({ filters: filters.map(optimizationFilterOutput) }, 200, { ...headers, "Cache-Control": "no-store" });
+    }
+    if (!isUUID(suffix) || request.method !== "PATCH") {
+      return json({ error: "Method not allowed" }, 405, { ...headers, Allow: "GET,PATCH,OPTIONS" });
+    }
+    const body = await catalogRequestJSON(request);
+    const update = {};
+    if (typeof body?.label === "string") update.label = body.label.trim().slice(0, 80);
+    if (typeof body?.shortLabel === "string") update.short_label = body.shortLabel.trim().slice(0, 40);
+    if (typeof body?.description === "string") update.description = body.description.trim().slice(0, 600);
+    if (typeof body?.isActive === "boolean") update.is_active = body.isActive;
+    if (typeof body?.isUserFacing === "boolean") update.is_user_facing = body.isUserFacing;
+    if (["threshold", "inverse_threshold", "range", "composite", "boolean", "heuristic"].includes(body?.scoringMode)) update.scoring_mode = body.scoringMode;
+    if (body?.scoringDefinition && typeof body.scoringDefinition === "object" && !Array.isArray(body.scoringDefinition)) update.scoring_definition = body.scoringDefinition;
+    if (Array.isArray(body?.minimumNutritionDataRequired)) update.minimum_nutrition_data_required = body.minimumNutritionDataRequired.map((item) => String(item)).slice(0, 30);
+    if (Number.isInteger(body?.scoringVersion) && body.scoringVersion > 0) update.scoring_version = body.scoringVersion;
+    if (!Object.keys(update).length) throw new CatalogAPIError(400, "No supported filter changes were supplied.");
+    const rows = await catalogRestJSON(env, "recipe_optimization_filters", {
+      method: "PATCH",
+      search: new URLSearchParams({ id: `eq.${suffix}`, select: "*" }),
+      body: update,
+      prefer: "return=representation",
+    });
+    if (!rows.length) return json({ error: "Optimization filter not found." }, 404, headers);
+    return json({ filter: optimizationFilterOutput(rows[0]) }, 200, { ...headers, "Cache-Control": "no-store" });
+  } catch (error) {
+    return catalogErrorResponse(error, headers);
+  }
+}
+
+async function listPublicRecipeFilters(env, headers) {
+  try {
+    const filters = await loadOptimizationFilters(env, { active: true, userFacing: true });
+    return json({ filters: filters.map(publicOptimizationFilterOutput) }, 200, { ...headers, "Cache-Control": "public, max-age=300" });
+  } catch (error) {
+    return catalogErrorResponse(error, headers);
+  }
+}
+
+async function handlePublicOptimizedRecipes(env, headers, url) {
+  try {
+    const suffix = url.pathname.slice(publicRecipesPath.length).replace(/^\/+|\/+$/g, "");
+    if (suffix) {
+      const segments = suffix.split("/");
+      if (segments.length !== 2 || segments[1] !== "filter-scores" || !isUUID(segments[0])) {
+        return json({ error: "Not found" }, 404, headers);
+      }
+      const recipe = await loadCatalogRecipe(env, segments[0]);
+      if (!recipe || recipe.status !== "published") return json({ error: "Recipe not found." }, 404, headers);
+      const scores = await loadRecipeOptimizationScores(env, recipe.id, { publicOnly: true });
+      return json({ recipeID: recipe.id, scores }, 200, { ...headers, "Cache-Control": "public, max-age=300" });
+    }
+
+    const filterSlugs = [...new Set(String(url.searchParams.get("filters") ?? "").split(",").map((item) => item.trim()).filter(Boolean))].slice(0, 8);
+    const mealType = ["breakfast", "lunch", "dinner", "snack"].includes(url.searchParams.get("mealType")) ? url.searchParams.get("mealType") : null;
+    const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit")) || 25));
+    const offset = Math.max(0, Math.min(10_000, Number(url.searchParams.get("offset")) || 0));
+    if (!filterSlugs.length) {
+      const search = new URLSearchParams({ select: "*", status: "eq.published", order: "editorial_priority.desc,published_at.desc", limit: String(limit), offset: String(offset) });
+      if (mealType) search.set("meal_types", `cs.{${mealType}}`);
+      const rows = await catalogRestJSON(env, "catalog_recipes", { search });
+      return json({ recipes: rows.map((row) => catalogRecipeOutput(row, [])), selectedFilters: [] }, 200, { ...headers, "Cache-Control": "public, max-age=120" });
+    }
+    const available = await loadOptimizationFilters(env, { active: true, userFacing: true, slugs: filterSlugs });
+    if (available.length !== filterSlugs.length) throw new CatalogAPIError(400, "One or more recipe filters are unavailable.");
+    const ranked = await catalogRestJSON(env, "rpc/rank_catalog_recipes", {
+      method: "POST",
+      body: { filter_slugs: filterSlugs, result_limit: limit, result_offset: offset, requested_meal_type: mealType },
+    });
+    const ids = ranked.map((row) => row.recipe_id);
+    const recipes = await loadCatalogRecipesByIDs(env, ids);
+    const byID = new Map(recipes.map((recipe) => [recipe.id, recipe]));
+    return json({
+      recipes: ranked.filter((rank) => byID.has(rank.recipe_id)).map((rank) => ({
+        ...catalogRecipeOutput(byID.get(rank.recipe_id), []),
+        combinedFilterScore: Number(rank.combined_score),
+        averageFilterScore: Number(rank.average_score),
+        weakestFilterScore: Number(rank.weakest_score),
+        filterScoreConfidence: Number(rank.confidence),
+      })),
+      selectedFilters: filterSlugs,
+    }, 200, { ...headers, "Cache-Control": "public, max-age=120" });
+  } catch (error) {
+    return catalogErrorResponse(error, headers);
+  }
+}
+
+async function getRecipeOptimizationScores(env, headers, recipeID) {
+  const recipe = await loadCatalogRecipe(env, recipeID);
+  if (!recipe) return json({ error: "Catalog recipe not found." }, 404, headers);
+  const scores = await loadRecipeOptimizationScores(env, recipeID);
+  return json({ recipeID, optimizationStatus: recipe.optimization_status, scores }, 200, { ...headers, "Cache-Control": "no-store" });
+}
+
+async function recalculateRecipeOptimization(env, headers, recipeID) {
+  const recipe = await loadCatalogRecipe(env, recipeID);
+  if (!recipe) return json({ error: "Catalog recipe not found." }, 404, headers);
+  try {
+    const scores = await calculateAndPersistRecipeScores(env, recipe);
+    return json({ recipeID, optimizationStatus: "ready", scores }, 200, { ...headers, "Cache-Control": "no-store" });
+  } catch (error) {
+    await markRecipeOptimizationFailed(env, recipeID);
+    throw error;
+  }
+}
+
+async function setRecipeOptimizationOverride(request, env, headers, recipeID, filterID, editorEmail) {
+  if (!isUUID(filterID)) throw new CatalogAPIError(400, "A valid optimization filter ID is required.");
+  const recipe = await loadCatalogRecipe(env, recipeID);
+  if (!recipe) return json({ error: "Catalog recipe not found." }, 404, headers);
+  const search = new URLSearchParams({ recipe_id: `eq.${recipeID}`, filter_id: `eq.${filterID}`, select: "*" });
+  const update = request.method === "DELETE"
+    ? { override_score: null, override_reason: null, overridden_by: null, overridden_at: null }
+    : await optimizationOverrideInput(request, editorEmail);
+  const rows = await catalogRestJSON(env, "recipe_filter_scores", { method: "PATCH", search, body: update, prefer: "return=representation" });
+  if (!rows.length) return json({ error: "Calculate this recipe before adding an override." }, 404, headers);
+  const scores = await loadRecipeOptimizationScores(env, recipeID);
+  return json({ score: scores.find((score) => score.filterID === filterID) ?? null }, 200, { ...headers, "Cache-Control": "no-store" });
+}
+
+async function optimizationOverrideInput(request, editorEmail) {
+  const body = await catalogRequestJSON(request);
+  const score = Number(body?.score);
+  const reason = String(body?.reason ?? "").trim().slice(0, 500);
+  if (!Number.isFinite(score) || score < 0 || score > 100 || reason.length < 3) throw new CatalogAPIError(400, "Overrides require a score from 0 to 100 and a reason.");
+  return { override_score: Math.round(score * 100) / 100, override_reason: reason, overridden_by: editorEmail, overridden_at: new Date().toISOString() };
+}
+
+async function calculateAndPersistRecipeScores(env, recipe) {
+  const filters = await loadOptimizationFilters(env, { active: true });
+  const calculated = scoreRecipeAgainstFilters(recipe, filters);
+  const now = new Date().toISOString();
+  const rows = calculated.map((score) => ({
+    recipe_id: recipe.id,
+    filter_id: score.filterID,
+    calculated_score: score.score,
+    confidence: score.confidence,
+    reasons_json: score.reasons,
+    inputs_json: score.inputs,
+    scoring_version: score.scoringVersion,
+    calculated_at: now,
+  }));
+  if (rows.length) {
+    await catalogRestJSON(env, "recipe_filter_scores", {
+      method: "POST",
+      search: new URLSearchParams({ on_conflict: "recipe_id,filter_id" }),
+      body: rows,
+      prefer: "resolution=merge-duplicates,return=minimal",
+      allowEmpty: true,
+    });
+  }
+  const maxVersion = filters.reduce((maximum, filter) => Math.max(maximum, Number(filter.scoring_version) || 1), 1);
+  await catalogRestJSON(env, "catalog_recipes", {
+    method: "PATCH",
+    search: new URLSearchParams({ id: `eq.${recipe.id}` }),
+    body: { optimization_status: "ready", optimization_scoring_version: maxVersion },
+    prefer: "return=minimal",
+    allowEmpty: true,
+  });
+  return loadRecipeOptimizationScores(env, recipe.id);
+}
+
+async function markRecipeOptimizationFailed(env, recipeID) {
+  await catalogRestJSON(env, "catalog_recipes", {
+    method: "PATCH",
+    search: new URLSearchParams({ id: `eq.${recipeID}` }),
+    body: { optimization_status: "failed" },
+    prefer: "return=minimal",
+    allowEmpty: true,
+  }).catch(() => {});
+}
+
+async function loadOptimizationFilters(env, options = {}) {
+  const search = new URLSearchParams({ select: "*", order: "category.asc,sort_order.asc,label.asc" });
+  if (options.active) search.set("is_active", "eq.true");
+  if (options.userFacing) search.set("is_user_facing", "eq.true");
+  if (options.slugs?.length) search.set("slug", `in.(${options.slugs.join(",")})`);
+  return catalogRestJSON(env, "recipe_optimization_filters", { search });
+}
+
+async function loadRecipeOptimizationScores(env, recipeID, options = {}) {
+  const filters = await loadOptimizationFilters(env, options.publicOnly ? { active: true, userFacing: true } : {});
+  const byID = new Map(filters.map((filter) => [filter.id, filter]));
+  const rows = await catalogRestJSON(env, "recipe_filter_scores", {
+    search: new URLSearchParams({ select: "*", recipe_id: `eq.${recipeID}`, order: "calculated_score.desc" }),
+  });
+  return rows.map((row) => recipeFilterScoreOutput(row, byID.get(row.filter_id))).filter((row) => row.filter);
+}
+
+async function loadCatalogRecipesByIDs(env, recipeIDs) {
+  if (!recipeIDs.length) return [];
+  return catalogRestJSON(env, "catalog_recipes", {
+    search: new URLSearchParams({ select: "*", id: `in.(${recipeIDs.join(",")})`, status: "eq.published" }),
+  });
 }
 
 async function generateCatalogRecipe(request, env, headers) {
@@ -953,6 +1213,26 @@ function normalizeCatalogRecipe(body, { id, creating, current = null }) {
     fiber_per_serving: normalizedInteger(body?.fiberPerServing ?? current?.fiber_per_serving, 0, 1_000),
     sugar_per_serving: normalizedInteger(body?.sugarPerServing ?? current?.sugar_per_serving, 0, 1_000),
     fat_per_serving: normalizedInteger(body?.fatPerServing ?? current?.fat_per_serving, 0, 1_000),
+    added_sugar_per_serving: normalizedNullableNumber(body?.addedSugarPerServing ?? current?.added_sugar_per_serving, 0, 1_000),
+    saturated_fat_per_serving: normalizedNullableNumber(body?.saturatedFatPerServing ?? current?.saturated_fat_per_serving, 0, 1_000),
+    sodium_mg_per_serving: normalizedNullableNumber(body?.sodiumMgPerServing ?? current?.sodium_mg_per_serving, 0, 100_000),
+    cholesterol_mg_per_serving: normalizedNullableNumber(body?.cholesterolMgPerServing ?? current?.cholesterol_mg_per_serving, 0, 100_000),
+    potassium_mg_per_serving: normalizedNullableNumber(body?.potassiumMgPerServing ?? current?.potassium_mg_per_serving, 0, 100_000),
+    calcium_mg_per_serving: normalizedNullableNumber(body?.calciumMgPerServing ?? current?.calcium_mg_per_serving, 0, 100_000),
+    iron_mg_per_serving: normalizedNullableNumber(body?.ironMgPerServing ?? current?.iron_mg_per_serving, 0, 10_000),
+    magnesium_mg_per_serving: normalizedNullableNumber(body?.magnesiumMgPerServing ?? current?.magnesium_mg_per_serving, 0, 100_000),
+    zinc_mg_per_serving: normalizedNullableNumber(body?.zincMgPerServing ?? current?.zinc_mg_per_serving, 0, 10_000),
+    selenium_mcg_per_serving: normalizedNullableNumber(body?.seleniumMcgPerServing ?? current?.selenium_mcg_per_serving, 0, 100_000),
+    vitamin_a_mcg_per_serving: normalizedNullableNumber(body?.vitaminAMcgPerServing ?? current?.vitamin_a_mcg_per_serving, 0, 100_000),
+    vitamin_c_mg_per_serving: normalizedNullableNumber(body?.vitaminCMgPerServing ?? current?.vitamin_c_mg_per_serving, 0, 100_000),
+    vitamin_d_mcg_per_serving: normalizedNullableNumber(body?.vitaminDMcgPerServing ?? current?.vitamin_d_mcg_per_serving, 0, 100_000),
+    vitamin_e_mg_per_serving: normalizedNullableNumber(body?.vitaminEMgPerServing ?? current?.vitamin_e_mg_per_serving, 0, 100_000),
+    vitamin_k_mcg_per_serving: normalizedNullableNumber(body?.vitaminKMcgPerServing ?? current?.vitamin_k_mcg_per_serving, 0, 100_000),
+    folate_mcg_per_serving: normalizedNullableNumber(body?.folateMcgPerServing ?? current?.folate_mcg_per_serving, 0, 100_000),
+    omega_3_g_per_serving: normalizedNullableNumber(body?.omega3GPerServing ?? current?.omega_3_g_per_serving, 0, 1_000),
+    serving_weight_grams: normalizedNullableNumber(body?.servingWeightGrams ?? current?.serving_weight_grams, 0.01, 100_000),
+    b_vitamins_per_serving: objectOrNull(body?.bVitaminsPerServing ?? current?.b_vitamins_per_serving),
+    dietary_metadata: objectOrEmpty(body?.dietaryMetadata ?? current?.dietary_metadata),
     ingredients,
     instructions,
     notes: String(body?.notes ?? current?.notes ?? "").trim().slice(0, 8_000),
@@ -978,6 +1258,26 @@ function catalogClassificationInputChanged(current, next) {
     "fiber_per_serving",
     "sugar_per_serving",
     "fat_per_serving",
+    "added_sugar_per_serving",
+    "saturated_fat_per_serving",
+    "sodium_mg_per_serving",
+    "cholesterol_mg_per_serving",
+    "potassium_mg_per_serving",
+    "calcium_mg_per_serving",
+    "iron_mg_per_serving",
+    "magnesium_mg_per_serving",
+    "zinc_mg_per_serving",
+    "selenium_mcg_per_serving",
+    "vitamin_a_mcg_per_serving",
+    "vitamin_c_mg_per_serving",
+    "vitamin_d_mcg_per_serving",
+    "vitamin_e_mg_per_serving",
+    "vitamin_k_mcg_per_serving",
+    "folate_mcg_per_serving",
+    "omega_3_g_per_serving",
+    "serving_weight_grams",
+    "b_vitamins_per_serving",
+    "dietary_metadata",
     "ingredients",
     "instructions",
   ];
@@ -1163,6 +1463,26 @@ function catalogRecipeOutput(row, tags) {
     fiberPerServing: row.fiber_per_serving,
     sugarPerServing: row.sugar_per_serving,
     fatPerServing: row.fat_per_serving,
+    addedSugarPerServing: nullableNumber(row.added_sugar_per_serving),
+    saturatedFatPerServing: nullableNumber(row.saturated_fat_per_serving),
+    sodiumMgPerServing: nullableNumber(row.sodium_mg_per_serving),
+    cholesterolMgPerServing: nullableNumber(row.cholesterol_mg_per_serving),
+    potassiumMgPerServing: nullableNumber(row.potassium_mg_per_serving),
+    calciumMgPerServing: nullableNumber(row.calcium_mg_per_serving),
+    ironMgPerServing: nullableNumber(row.iron_mg_per_serving),
+    magnesiumMgPerServing: nullableNumber(row.magnesium_mg_per_serving),
+    zincMgPerServing: nullableNumber(row.zinc_mg_per_serving),
+    seleniumMcgPerServing: nullableNumber(row.selenium_mcg_per_serving),
+    vitaminAMcgPerServing: nullableNumber(row.vitamin_a_mcg_per_serving),
+    vitaminCMgPerServing: nullableNumber(row.vitamin_c_mg_per_serving),
+    vitaminDMcgPerServing: nullableNumber(row.vitamin_d_mcg_per_serving),
+    vitaminEMgPerServing: nullableNumber(row.vitamin_e_mg_per_serving),
+    vitaminKMcgPerServing: nullableNumber(row.vitamin_k_mcg_per_serving),
+    folateMcgPerServing: nullableNumber(row.folate_mcg_per_serving),
+    bVitaminsPerServing: row.b_vitamins_per_serving,
+    omega3GPerServing: nullableNumber(row.omega_3_g_per_serving),
+    servingWeightGrams: nullableNumber(row.serving_weight_grams),
+    dietaryMetadata: row.dietary_metadata ?? {},
     ingredients: row.ingredients ?? [],
     instructions: row.instructions ?? [],
     notes: row.notes,
@@ -1172,6 +1492,8 @@ function catalogRecipeOutput(row, tags) {
     taggingStatus: row.tagging_status,
     taggingModel: row.tagging_model,
     taggingPromptVersion: row.tagging_prompt_version,
+    optimizationStatus: row.optimization_status ?? "pending",
+    optimizationScoringVersion: row.optimization_scoring_version,
     version: row.version,
     publishedAt: row.published_at,
     createdAt: row.created_at,
@@ -1191,6 +1513,67 @@ function catalogTagOutput(row) {
     requiresReview: row.requires_review,
     isActive: row.is_active,
     sortOrder: row.sort_order,
+  };
+}
+
+function optimizationFilterOutput(row) {
+  return {
+    id: row.id,
+    slug: row.slug,
+    label: row.label,
+    shortLabel: row.short_label,
+    description: row.description,
+    category: row.category,
+    icon: row.icon,
+    sortOrder: row.sort_order,
+    isActive: row.is_active,
+    isUserFacing: row.is_user_facing,
+    scoringMode: row.scoring_mode,
+    scoringDefinition: row.scoring_definition ?? {},
+    minimumNutritionDataRequired: row.minimum_nutrition_data_required ?? [],
+    scoringVersion: row.scoring_version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function publicOptimizationFilterOutput(row) {
+  const output = optimizationFilterOutput(row);
+  return {
+    id: output.id,
+    slug: output.slug,
+    label: output.label,
+    shortLabel: output.shortLabel,
+    description: output.description,
+    category: output.category,
+    icon: output.icon,
+    sortOrder: output.sortOrder,
+    scoringVersion: output.scoringVersion,
+  };
+}
+
+function recipeFilterScoreOutput(row, filter) {
+  if (!filter) return { filter: null };
+  const overrideScore = nullableNumber(row.override_score);
+  const calculatedScore = Number(row.calculated_score);
+  return {
+    filterID: filter.id,
+    slug: filter.slug,
+    label: filter.label,
+    category: filter.category,
+    score: overrideScore ?? calculatedScore,
+    calculatedScore,
+    confidence: Number(row.confidence),
+    reasons: Array.isArray(row.reasons_json) ? row.reasons_json : [],
+    inputs: row.inputs_json ?? {},
+    scoringVersion: row.scoring_version,
+    calculatedAt: row.calculated_at,
+    isOverridden: overrideScore !== null,
+    overrideScore,
+    overrideReason: row.override_reason,
+    overriddenBy: row.overridden_by,
+    overriddenAt: row.overridden_at,
+    filter: optimizationFilterOutput(filter),
   };
 }
 
@@ -1260,6 +1643,21 @@ function normalizedInteger(value, minimum, maximum) {
   const number = Math.round(Number(value));
   if (!Number.isFinite(number)) return minimum;
   return Math.max(minimum, Math.min(maximum, number));
+}
+
+function normalizedNullableNumber(value, minimum, maximum) {
+  if (value === undefined || value === null || value === "") return null;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return Math.max(minimum, Math.min(maximum, Math.round(number * 1_000) / 1_000));
+}
+
+function objectOrNull(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function objectOrEmpty(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
 function normalizedEnum(value, allowed, fallback) {

@@ -113,9 +113,9 @@ try {
 }
 
 async function scansAccountRecipesForAutomaticTagging() {
-  let requestedURL;
+  const requestedURLs = [];
   globalThis.fetch = async (url) => {
-    requestedURL = new URL(String(url));
+    requestedURLs.push(new URL(String(url)));
     return Response.json([]);
   };
 
@@ -127,10 +127,13 @@ async function scansAccountRecipesForAutomaticTagging() {
   });
   await scheduledWork;
 
-  assert.equal(requestedURL.pathname, "/rest/v1/catalog_recipes");
-  assert.equal(requestedURL.searchParams.get("status"), "eq.draft");
-  assert.equal(requestedURL.searchParams.get("tagging_status"), "eq.pending");
-  assert.equal(requestedURL.searchParams.get("source_shared_recipe_id"), "not.is.null");
+  const taggingRequest = requestedURLs.find((url) => url.searchParams.get("tagging_status") === "eq.pending");
+  const scoringRequest = requestedURLs.find((url) => url.searchParams.get("optimization_status") === "eq.pending");
+  assert.equal(taggingRequest?.pathname, "/rest/v1/catalog_recipes");
+  assert.equal(taggingRequest?.searchParams.get("status"), "eq.draft");
+  assert.equal(taggingRequest?.searchParams.get("source_shared_recipe_id"), "not.is.null");
+  assert.equal(scoringRequest?.pathname, "/rest/v1/catalog_recipes");
+  assert.equal(scoringRequest?.searchParams.get("status"), "neq.archived");
 }
 
 async function analyzesMealFromTextAndPhoto() {

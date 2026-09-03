@@ -26,6 +26,40 @@ type CatalogTag = {
   requiresReview: boolean;
 };
 
+type OptimizationFilter = {
+  id: string;
+  slug: string;
+  label: string;
+  shortLabel: string;
+  description: string;
+  category: string;
+  icon: string;
+  sortOrder: number;
+  isActive: boolean;
+  isUserFacing: boolean;
+  scoringMode: "threshold" | "inverse_threshold" | "range" | "composite" | "boolean" | "heuristic";
+  scoringDefinition: Record<string, unknown>;
+  minimumNutritionDataRequired: string[];
+  scoringVersion: number;
+};
+
+type OptimizationScore = {
+  filterID: string;
+  slug: string;
+  label: string;
+  category: string;
+  score: number;
+  calculatedScore: number;
+  confidence: number;
+  reasons: string[];
+  inputs: Record<string, unknown>;
+  scoringVersion: number;
+  calculatedAt: string;
+  isOverridden: boolean;
+  overrideScore: number | null;
+  overrideReason: string | null;
+};
+
 type CatalogRecipe = {
   id: string;
   slug: string;
@@ -47,6 +81,24 @@ type CatalogRecipe = {
   fiberPerServing: number;
   sugarPerServing: number;
   fatPerServing: number;
+  addedSugarPerServing: number | null;
+  saturatedFatPerServing: number | null;
+  sodiumMgPerServing: number | null;
+  cholesterolMgPerServing: number | null;
+  potassiumMgPerServing: number | null;
+  calciumMgPerServing: number | null;
+  ironMgPerServing: number | null;
+  magnesiumMgPerServing: number | null;
+  zincMgPerServing: number | null;
+  seleniumMcgPerServing: number | null;
+  vitaminAMcgPerServing: number | null;
+  vitaminCMgPerServing: number | null;
+  vitaminDMcgPerServing: number | null;
+  vitaminEMgPerServing: number | null;
+  vitaminKMcgPerServing: number | null;
+  folateMcgPerServing: number | null;
+  omega3GPerServing: number | null;
+  servingWeightGrams: number | null;
   ingredients: Ingredient[];
   instructions: Instruction[];
   notes: string;
@@ -54,6 +106,7 @@ type CatalogRecipe = {
   imageAltText: string;
   editorialPriority: number;
   taggingStatus: "pending" | "ready" | "needs_review" | "failed";
+  optimizationStatus: "pending" | "ready" | "failed";
   version: number;
   tags: TagAssignment[];
 };
@@ -72,18 +125,42 @@ type Props = {
 };
 
 const mealTypes = ["breakfast", "lunch", "dinner", "snack"];
+const advancedNutritionFields = [
+  { key: "addedSugarPerServing", label: "Added sugar g" },
+  { key: "saturatedFatPerServing", label: "Saturated fat g" },
+  { key: "sodiumMgPerServing", label: "Sodium mg" },
+  { key: "cholesterolMgPerServing", label: "Cholesterol mg" },
+  { key: "potassiumMgPerServing", label: "Potassium mg" },
+  { key: "calciumMgPerServing", label: "Calcium mg" },
+  { key: "ironMgPerServing", label: "Iron mg" },
+  { key: "magnesiumMgPerServing", label: "Magnesium mg" },
+  { key: "zincMgPerServing", label: "Zinc mg" },
+  { key: "seleniumMcgPerServing", label: "Selenium mcg" },
+  { key: "vitaminAMcgPerServing", label: "Vitamin A mcg" },
+  { key: "vitaminCMgPerServing", label: "Vitamin C mg" },
+  { key: "vitaminDMcgPerServing", label: "Vitamin D mcg" },
+  { key: "vitaminEMgPerServing", label: "Vitamin E mg" },
+  { key: "vitaminKMcgPerServing", label: "Vitamin K mcg" },
+  { key: "folateMcgPerServing", label: "Folate mcg" },
+  { key: "omega3GPerServing", label: "Omega-3 g" },
+  { key: "servingWeightGrams", label: "Serving weight g" },
+] as const;
 
 export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, onStatus }: Props) {
   const [recipes, setRecipes] = useState<CatalogRecipe[]>([]);
   const [tags, setTags] = useState<CatalogTag[]>([]);
+  const [optimizationFilters, setOptimizationFilters] = useState<OptimizationFilter[]>([]);
+  const [optimizationScores, setOptimizationScores] = useState<OptimizationScore[]>([]);
   const [draft, setDraft] = useState<CatalogRecipe>(emptyRecipe);
   const [selectedTags, setSelectedTags] = useState<Set<string>>(new Set());
   const [sourceMode, setSourceMode] = useState<"url" | "text" | "ai">("url");
   const [sourceInput, setSourceInput] = useState("");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [optimizationQuery, setOptimizationQuery] = useState("");
+  const [optimizationCategory, setOptimizationCategory] = useState("all");
   const [hasMore, setHasMore] = useState(false);
-  const [busy, setBusy] = useState<"load" | "source" | "save" | "tags" | "image" | null>(null);
+  const [busy, setBusy] = useState<"load" | "source" | "save" | "tags" | "image" | "optimization" | "filters" | null>(null);
 
   const groupedTags = useMemo(() => {
     const groups = new Map<string, CatalogTag[]>();
@@ -91,8 +168,16 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
     return [...groups.entries()];
   }, [tags]);
 
+  const visibleOptimizationFilters = useMemo(() => optimizationFilters.filter((filter) => {
+    const matchesQuery = !optimizationQuery.trim() || `${filter.label} ${filter.slug} ${filter.description}`.toLowerCase().includes(optimizationQuery.trim().toLowerCase());
+    return matchesQuery && (optimizationCategory === "all" || filter.category === optimizationCategory);
+  }), [optimizationFilters, optimizationQuery, optimizationCategory]);
+
+  const optimizationCategories = useMemo(() => [...new Set(optimizationFilters.map((filter) => filter.category))], [optimizationFilters]);
+  const scoresByFilter = useMemo(() => new Map(optimizationScores.map((score) => [score.filterID, score])), [optimizationScores]);
+
   useEffect(() => {
-    if (enabled) void Promise.all([loadRecipes(), loadTags()]);
+    if (enabled) void Promise.all([loadRecipes(), loadTags(), loadOptimizationFilters()]);
   }, [enabled]);
 
   async function api(path: string, init: RequestInit = {}) {
@@ -140,10 +225,96 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
     }
   }
 
+  async function loadOptimizationFilters() {
+    if (!credential) return;
+    try {
+      const data = await api("/admin/catalog/filters") as { filters: OptimizationFilter[] };
+      setOptimizationFilters(data.filters);
+    } catch (error) {
+      onStatus(message(error));
+    }
+  }
+
+  async function loadOptimizationScores(recipeID: string) {
+    if (!recipeID) return setOptimizationScores([]);
+    try {
+      const data = await api(`/admin/catalog/recipes/${recipeID}/optimization`) as { scores: OptimizationScore[] };
+      setOptimizationScores(data.scores);
+    } catch (error) {
+      onStatus(message(error));
+    }
+  }
+
   function selectRecipe(recipe: CatalogRecipe) {
     setDraft(structuredClone(recipe));
     setSelectedTags(new Set(recipe.tags.map((tag) => tag.slug)));
     setSourceInput("");
+    void loadOptimizationScores(recipe.id);
+  }
+
+  async function recalculateOptimization() {
+    let recipe = draft;
+    if (!recipe.id) {
+      const saved = await save("draft");
+      if (!saved) return;
+      recipe = saved;
+    }
+    setBusy("optimization");
+    try {
+      const data = await api(`/admin/catalog/recipes/${recipe.id}/optimization`, { method: "POST" }) as { scores: OptimizationScore[] };
+      setOptimizationScores(data.scores);
+      setDraft((current) => ({ ...current, optimizationStatus: "ready" }));
+      onStatus(`Calculated ${data.scores.length} optimization scores.`);
+    } catch (error) {
+      onStatus(message(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function updateOptimizationFilter(filter: OptimizationFilter, change: Partial<OptimizationFilter>) {
+    setBusy("filters");
+    try {
+      const data = await api(`/admin/catalog/filters/${filter.id}`, { method: "PATCH", body: JSON.stringify(change) }) as { filter: OptimizationFilter };
+      setOptimizationFilters((current) => current.map((item) => item.id === filter.id ? data.filter : item));
+      onStatus(`${data.filter.label} updated. Recipe scores are queued when its formula changes.`);
+    } catch (error) {
+      onStatus(message(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function overrideOptimizationScore(score: OptimizationScore) {
+    if (!draft.id) return;
+    const entered = window.prompt(`Exceptional override for ${score.label}: enter a score from 0–100.`, String(Math.round(score.score)));
+    if (entered === null) return;
+    const reason = window.prompt("Explain why the calculated score should be overridden. This is saved in the audit fields.", score.overrideReason ?? "");
+    if (reason === null) return;
+    setBusy("optimization");
+    try {
+      await api(`/admin/catalog/recipes/${draft.id}/optimization/${score.filterID}/override`, { method: "PUT", body: JSON.stringify({ score: Number(entered), reason }) });
+      await loadOptimizationScores(draft.id);
+      onStatus(`${score.label} now has a clearly marked manual override.`);
+    } catch (error) {
+      onStatus(message(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function clearOptimizationOverride(score: OptimizationScore) {
+    if (!draft.id) return;
+    setBusy("optimization");
+    try {
+      await api(`/admin/catalog/recipes/${draft.id}/optimization/${score.filterID}/override`, { method: "DELETE" });
+      await loadOptimizationScores(draft.id);
+      onStatus(`${score.label} is using its calculated score again.`);
+    } catch (error) {
+      onStatus(message(error));
+    } finally {
+      setBusy(null);
+    }
   }
 
   async function analyzeSource() {
@@ -314,7 +485,7 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
           </section>
 
           <div className="recipe-editor-heading">
-            <div><span className={`recipe-status recipe-status-${draft.status}`}>{draft.status}</span><span className="recipe-status">tags: {draft.taggingStatus.replace("_", " ")}</span></div>
+            <div><span className={`recipe-status recipe-status-${draft.status}`}>{draft.status}</span><span className="recipe-status">tags: {draft.taggingStatus.replace("_", " ")}</span><span className="recipe-status">scores: {draft.optimizationStatus}</span></div>
             <strong>{draft.id ? `v${draft.version}` : "Unsaved"}</strong>
           </div>
 
@@ -338,6 +509,14 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
             {(["caloriesPerServing", "proteinPerServing", "carbsPerServing", "fiberPerServing", "sugarPerServing", "fatPerServing"] as const).map((key) => <Field label={macroLabel(key)} key={key}><NumberInput value={draft[key]} onChange={(value) => setDraft({ ...draft, [key]: value })} /></Field>)}
           </div>
 
+          <details className="recipe-advanced-nutrition">
+            <summary>Advanced nutrition inputs</summary>
+            <p>Optional per-serving values improve score confidence. Leave unknown values blank—blank is different from zero.</p>
+            <div className="recipe-macro-grid">
+              {advancedNutritionFields.map(({ key, label }) => <Field label={label} key={key}><NullableNumberInput value={draft[key]} onChange={(value) => setDraft({ ...draft, [key]: value })} /></Field>)}
+            </div>
+          </details>
+
           <Field label="Ingredients — quantity | ingredient | calories" wide><textarea rows={9} value={ingredientsText(draft.ingredients)} onChange={(event) => setDraft({ ...draft, ingredients: parseIngredients(event.target.value) })} placeholder="1 lb | chicken breast | 750" /></Field>
           <Field label="Instructions — one step per line" wide><textarea rows={8} value={draft.instructions.map((item) => item.text).join("\n")} onChange={(event) => setDraft({ ...draft, instructions: parseInstructions(event.target.value) })} /></Field>
           <div className="recipe-form-grid">
@@ -356,6 +535,37 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
             </div></fieldset>)}
           </section>
 
+          <section className="recipe-optimization-editor">
+            <div className="recipe-tag-heading">
+              <div><h3>Recipe optimization</h3><p>Versioned scores are calculated from nutrition, ingredients, and preparation data. Confidence reflects available inputs; overrides are exceptional and visibly marked.</p></div>
+              <button className="button button-secondary" type="button" disabled={busy === "optimization" || !draft.title.trim()} onClick={recalculateOptimization}>{busy === "optimization" ? "Calculating…" : "Recalculate scores"}</button>
+            </div>
+
+            {optimizationScores.length ? <div className="recipe-optimization-top">
+              {optimizationScores.slice(0, 6).map((score) => <article key={score.filterID} className={`recipe-score-card ${score.isOverridden ? "is-overridden" : ""}`}>
+                <div><strong>{score.label}</strong><span>{Math.round(score.score)}</span></div>
+                <small>{Math.round(score.confidence * 100)}% confidence · v{score.scoringVersion}{score.isOverridden ? " · manual override" : ""}</small>
+                {score.reasons.length ? <ul>{score.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul> : <p>No strong reason codes with current inputs.</p>}
+                <details><summary>Inputs & calculation</summary><pre>{JSON.stringify({ calculatedScore: score.calculatedScore, inputs: score.inputs, overrideReason: score.overrideReason }, null, 2)}</pre></details>
+                <div className="recipe-score-actions"><button type="button" onClick={() => overrideOptimizationScore(score)}>Override</button>{score.isOverridden ? <button type="button" onClick={() => clearOptimizationOverride(score)}>Clear override</button> : null}</div>
+              </article>)}
+            </div> : <p className="admin-empty-state">Save the recipe, then calculate scores to preview its strongest goals.</p>}
+
+            <div className="recipe-filter-manager-heading">
+              <div><h4>Filter management</h4><p>{optimizationFilters.length} canonical filters in one database-backed taxonomy.</p></div>
+              <div className="recipe-catalog-filters"><input type="search" value={optimizationQuery} placeholder="Search filters" onChange={(event) => setOptimizationQuery(event.target.value)} /><select value={optimizationCategory} onChange={(event) => setOptimizationCategory(event.target.value)}><option value="all">All categories</option>{optimizationCategories.map((category) => <option value={category} key={category}>{optimizationCategoryLabel(category)}</option>)}</select></div>
+            </div>
+            <div className="recipe-filter-manager">
+              {visibleOptimizationFilters.map((filter) => { const score = scoresByFilter.get(filter.id); return <details className="recipe-filter-row" key={filter.id}>
+                <summary><span><strong>{filter.label}</strong><small>{optimizationCategoryLabel(filter.category)} · {filter.scoringMode} · v{filter.scoringVersion}</small></span><b>{score ? Math.round(score.score) : "—"}</b></summary>
+                <p>{filter.description}</p>
+                <div className="recipe-filter-toggles"><label><input type="checkbox" checked={filter.isActive} disabled={busy === "filters"} onChange={(event) => updateOptimizationFilter(filter, { isActive: event.target.checked })} />Active</label><label><input type="checkbox" checked={filter.isUserFacing} disabled={busy === "filters"} onChange={(event) => updateOptimizationFilter(filter, { isUserFacing: event.target.checked })} />User-facing</label></div>
+                <pre>{JSON.stringify({ scoringDefinition: filter.scoringDefinition, minimumNutritionDataRequired: filter.minimumNutritionDataRequired }, null, 2)}</pre>
+                {score ? <p><strong>{Math.round(score.confidence * 100)}% confidence.</strong> {score.reasons.join(" · ") || "No strong reason codes."}</p> : null}
+              </details>; })}
+            </div>
+          </section>
+
           <div className="recipe-editor-actions"><button className="button button-secondary" type="button" disabled={busy === "save"} onClick={() => save("draft")}>Save draft</button>{draft.id && draft.status !== "archived" ? <button className="button button-secondary button-danger" type="button" disabled={busy === "save"} onClick={() => save("archived")}>Archive</button> : null}<button className="button button-primary" type="button" disabled={busy === "save"} onClick={() => save("published")}>{busy === "save" ? "Saving…" : "Publish"}</button></div>
         </div>
       </div>
@@ -371,8 +581,12 @@ function NumberInput({ value, min = 0, onChange }: { value: number; min?: number
   return <input type="number" min={min} value={value} onChange={(event) => onChange(Number(event.target.value) || 0)} />;
 }
 
+function NullableNumberInput({ value, onChange }: { value: number | null; onChange: (value: number | null) => void }) {
+  return <input type="number" min={0} step="any" value={value ?? ""} onChange={(event) => onChange(event.target.value === "" ? null : Math.max(0, Number(event.target.value) || 0))} />;
+}
+
 function emptyRecipe(): CatalogRecipe {
-  return { id: "", slug: "", status: "draft", title: "", summary: "", sourceType: "manual", sourceURL: "", sourceAttribution: "", rightsStatus: "pending", mealTypes: [], servings: 1, portionDescription: "", prepMinutes: 0, cookMinutes: 0, caloriesPerServing: 0, proteinPerServing: 0, carbsPerServing: 0, fiberPerServing: 0, sugarPerServing: 0, fatPerServing: 0, ingredients: [], instructions: [], notes: "", imageURL: null, imageAltText: "", editorialPriority: 0, taggingStatus: "pending", version: 1, tags: [] };
+  return { id: "", slug: "", status: "draft", title: "", summary: "", sourceType: "manual", sourceURL: "", sourceAttribution: "", rightsStatus: "pending", mealTypes: [], servings: 1, portionDescription: "", prepMinutes: 0, cookMinutes: 0, caloriesPerServing: 0, proteinPerServing: 0, carbsPerServing: 0, fiberPerServing: 0, sugarPerServing: 0, fatPerServing: 0, addedSugarPerServing: null, saturatedFatPerServing: null, sodiumMgPerServing: null, cholesterolMgPerServing: null, potassiumMgPerServing: null, calciumMgPerServing: null, ironMgPerServing: null, magnesiumMgPerServing: null, zincMgPerServing: null, seleniumMcgPerServing: null, vitaminAMcgPerServing: null, vitaminCMgPerServing: null, vitaminDMcgPerServing: null, vitaminEMgPerServing: null, vitaminKMcgPerServing: null, folateMcgPerServing: null, omega3GPerServing: null, servingWeightGrams: null, ingredients: [], instructions: [], notes: "", imageURL: null, imageAltText: "", editorialPriority: 0, taggingStatus: "pending", optimizationStatus: "pending", version: 1, tags: [] };
 }
 
 function mergeImport(current: CatalogRecipe, imported: ImportedRecipe, mode: "url" | "text" | "ai"): CatalogRecipe {
@@ -385,3 +599,4 @@ function parseInstructions(value: string): Instruction[] { return value.split("\
 function sourcePlaceholder(mode: "url" | "text" | "ai") { return mode === "url" ? "https://example.com/recipe" : mode === "text" ? "Paste ingredients, instructions, notes, or recipe copy…" : "A high-protein weeknight dinner under 500 calories with Mediterranean flavors…"; }
 function message(error: unknown) { return error instanceof Error ? error.message : "The recipe request failed."; }
 function macroLabel(key: string) { return ({ caloriesPerServing: "Calories", proteinPerServing: "Protein g", carbsPerServing: "Carbs g", fiberPerServing: "Fiber g", sugarPerServing: "Sugar g", fatPerServing: "Fat g" } as Record<string, string>)[key]; }
+function optimizationCategoryLabel(category: string) { return category.split("_").map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" & "); }

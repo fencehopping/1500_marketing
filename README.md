@@ -64,8 +64,17 @@ PATCH /admin/catalog/recipes/:id
 POST /admin/catalog/recipes/:id/classify
 PUT /admin/catalog/recipes/:id/tags
 POST /admin/catalog/recipes/:id/image
+GET /admin/catalog/recipes/:id/optimization
+POST /admin/catalog/recipes/:id/optimization
+PUT /admin/catalog/recipes/:id/optimization/:filterId/override
+DELETE /admin/catalog/recipes/:id/optimization/:filterId/override
 GET /admin/catalog/tags
+GET /admin/catalog/filters
+PATCH /admin/catalog/filters/:id
 POST /admin/catalog/recipes/generate
+GET /recipe-filters
+GET /recipes/:id/filter-scores
+GET /recipes?filters=high-protein,low-carb
 POST /admin/download-links?appId=jetstream
 GET /admin/download/images.zip?appId=jetstream&token=ONE_TIME_TOKEN
 ```
@@ -81,6 +90,10 @@ The 1500 recipe catalog is managed from the 1500 app in `/admin`. Recipes can st
 Apply `../supabase/migrations/20260903000000_catalog_recipes.sql` before enabling the catalog endpoints. The migration creates the recipe, tag, collection, version-history, and public feed objects, seeds the initial taxonomy, enables RLS, and exposes only published recipes through `catalog_recipe_feed`.
 
 Apply `../supabase/migrations/20260903195500_catalog_account_sync.sql` to keep recipes owned by `nickholroyd@gmail.com` in sync with catalog drafts. It backfills existing approved shared recipes, mirrors future inserts and edits, archives deleted or moderated source recipes, and resets changed recipes for review. The Worker cron classifies pending account imports every five minutes; publishing remains a separate manual action so source rights, images, and AI tags can be reviewed first.
+
+Apply `../supabase/migrations/20260903210000_recipe_optimization_filters.sql` for the optimization platform. It adds nullable extended nutrition fields, 113 canonical filters in 13 categories, persisted versioned scores, confidence and reason/input snapshots, audited manual overrides, stale-score triggers, public score policies, and the database-backed multi-filter ranking function. `worker/recipe-optimization.mjs` evaluates the database definitions using threshold, inverse-threshold, range, composite, boolean, and heuristic modes. Scores are recalculated on recipe changes by the five-minute Worker cron or immediately from the studio. Multi-select ranking uses an equal-weight average with a 25% weak-dimension penalty.
+
+Micronutrients, added sugar, saturated fat, sodium, cholesterol, omega-3, and serving weight are nullable by design. Existing recipes can be scored from their current macro and ingredient data while confidence reflects missing inputs; editors can add richer per-serving values from the Advanced nutrition section.
 
 The iOS recipe importer calls `POST /recipe/image` after the user reviews an imported recipe. The endpoint generates a standardized square food image from the edited recipe title only; the OpenAI key remains in the Worker and is never shipped in the app.
 

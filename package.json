@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "upload:images": "node scripts/bulk-upload-images.mjs",
-    "test:worker": "node tests/admin-api-smoke.mjs"
+    "test:worker": "node tests/recipe-optimization.test.mjs && node tests/admin-api-smoke.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",
