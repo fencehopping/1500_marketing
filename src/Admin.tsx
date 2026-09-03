@@ -465,8 +465,8 @@ export default function Admin() {
       <main className="admin-page admin-login-page">
         <section className="admin-login-card">
           <p className="eyebrow">Admin</p>
-          <h1>Food image library</h1>
-          <p>Sign in with the authorized Google account to manage Cloudflare food images.</p>
+          <h1>{selectedApp.id === "1500" ? "1500 content studio" : `${selectedApp.displayName} image library`}</h1>
+          <p>{selectedApp.id === "1500" ? "Sign in with the authorized Google account to manage recipes, classifications, and food images." : "Sign in with the authorized Google account to manage Cloudflare images."}</p>
           <div className="admin-login-status">
             <strong>{user ? user.email : "Not signed in"}</strong>
             <span>{status}</span>
