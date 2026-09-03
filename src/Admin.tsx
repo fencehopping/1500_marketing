@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import RecipeCatalogAdmin from "./admin/RecipeCatalogAdmin";
 import { adminApps, defaultAdminApp } from "./data/adminApps";
 import { knownImageNames } from "./data/imageCatalog";
 
@@ -21,6 +22,25 @@ type ImageRecord = {
   size?: number;
   uploaded?: string;
   source: "catalog" | "r2";
+};
+
+type AICatalogItem = {
+  slug: string;
+  name: string;
+  suggestedKeyword: string;
+  suggestedFilename: string;
+  exampleServing: string;
+  calories: number;
+  protein: number;
+  carbs: number | null;
+  fiber: number | null;
+  sugar: number | null;
+  fat: number | null;
+  catalogEntries: number;
+  totalUses: number;
+  currentImageName: string;
+  firstAddedAt: string;
+  lastAddedAt: string;
 };
 
 declare global {
@@ -52,6 +72,8 @@ export default function Admin() {
   const [user, setUser] = useState<GoogleUser | null>(null);
   const [selectedAppId, setSelectedAppId] = useState(defaultAdminApp.id);
   const [images, setImages] = useState<ImageRecord[]>([]);
+  const [aiCatalogItems, setAICatalogItems] = useState<AICatalogItem[]>([]);
+  const [aiCatalogQuery, setAICatalogQuery] = useState("");
   const [query, setQuery] = useState("");
   const [keyword, setKeyword] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -59,6 +81,8 @@ export default function Admin() {
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isExportingTaxonomy, setIsExportingTaxonomy] = useState(false);
+  const [isLoadingAICatalog, setIsLoadingAICatalog] = useState(false);
+  const [isExportingAICatalog, setIsExportingAICatalog] = useState(false);
   const [isGeneratingZipLink, setIsGeneratingZipLink] = useState(false);
   const [zipDownloadLink, setZipDownloadLink] = useState<{ url: string; expiresAt: string; filename: string } | null>(null);
 
@@ -92,6 +116,18 @@ export default function Admin() {
         .includes(normalizedQuery),
     );
   }, [images, query]);
+  const filteredAICatalogItems = useMemo(() => {
+    const normalizedQuery = aiCatalogQuery.trim().toLowerCase();
+    if (!normalizedQuery) {
+      return aiCatalogItems;
+    }
+    return aiCatalogItems.filter((item) =>
+      [item.name, item.slug, item.suggestedKeyword, item.exampleServing, item.currentImageName]
+        .join(" ")
+        .toLowerCase()
+        .includes(normalizedQuery),
+    );
+  }, [aiCatalogItems, aiCatalogQuery]);
 
   useEffect(() => {
     selectedAppRef.current = selectedApp;
@@ -134,9 +170,14 @@ export default function Admin() {
   useEffect(() => {
     setImages([]);
     setQuery("");
+    setAICatalogItems([]);
+    setAICatalogQuery("");
     setZipDownloadLink(null);
     if (canUseApi) {
       void loadImages();
+      if (selectedApp.id === "1500") {
+        void loadAICatalog();
+      }
     }
   }, [canUseApi, selectedAppId]);
 
@@ -231,6 +272,64 @@ export default function Admin() {
       setStatus(error instanceof Error ? error.message : "Upload failed.");
     } finally {
       setIsUploading(false);
+    }
+  }
+
+  async function loadAICatalog() {
+    if (!adminApiBaseUrl || !credential || !isAllowed || selectedApp.id !== "1500") {
+      return;
+    }
+
+    setIsLoadingAICatalog(true);
+    try {
+      const response = await fetch(`${adminApiBaseUrl}/admin/ai-food-catalog`, {
+        headers: {
+          Authorization: `Bearer ${credential}`,
+        },
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      const data = (await response.json()) as { items: AICatalogItem[] };
+      setAICatalogItems(data.items);
+      setStatus(`Loaded ${data.items.length} accepted AI food items.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not load accepted AI food items.");
+    } finally {
+      setIsLoadingAICatalog(false);
+    }
+  }
+
+  async function exportAICatalogCsv() {
+    if (!adminApiBaseUrl || !credential || !isAllowed || selectedApp.id !== "1500") {
+      setStatus("Sign in as the 1500 admin before exporting accepted AI foods.");
+      return;
+    }
+
+    setIsExportingAICatalog(true);
+    try {
+      const response = await fetch(`${adminApiBaseUrl}/admin/export/ai-food-catalog.csv`, {
+        headers: {
+          Authorization: `Bearer ${credential}`,
+        },
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "1500-ai-food-catalog.csv";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setStatus(`Exported ${aiCatalogItems.length} accepted AI food items.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "AI food catalog export failed.");
+    } finally {
+      setIsExportingAICatalog(false);
     }
   }
 
@@ -399,8 +498,8 @@ export default function Admin() {
       <header className="admin-header">
         <div>
           <p className="eyebrow">Admin</p>
-          <h1>{selectedApp.id === "1500" ? "Food image library" : `${selectedApp.displayName} image library`}</h1>
-          <p>Browse current Cloudflare images, search by keyword, upload new keyword images, and remove old ones.</p>
+          <h1>{selectedApp.id === "1500" ? "1500 content studio" : `${selectedApp.displayName} image library`}</h1>
+          <p>{selectedApp.id === "1500" ? "Create and publish recipes, review AI classifications, and manage the app’s food imagery." : "Browse current Cloudflare images, search by keyword, upload new keyword images, and remove old ones."}</p>
         </div>
         <a className="button button-secondary" href="/">
           Website
@@ -425,6 +524,88 @@ export default function Admin() {
         {user?.picture ? <img src={user.picture} alt="" /> : null}
         {!user ? <div id="googleSignIn" /> : null}
       </section>
+
+      {selectedApp.id === "1500" ? (
+        <RecipeCatalogAdmin
+          apiBaseURL={adminApiBaseUrl}
+          credential={credential}
+          enabled={canUseApi}
+          onStatus={setStatus}
+        />
+      ) : null}
+
+      {selectedApp.id === "1500" ? (
+        <section className="admin-panel ai-catalog-panel">
+          <div className="image-list-header">
+            <div>
+              <p className="eyebrow">Accepted AI foods</p>
+              <h2>
+                {aiCatalogQuery.trim()
+                  ? `${filteredAICatalogItems.length} of ${aiCatalogItems.length} items`
+                  : `${aiCatalogItems.length} image candidates`}
+              </h2>
+              <p className="admin-panel-description">
+                Confirmed photo and description estimates, grouped without user-identifying data.
+              </p>
+            </div>
+            <div className="image-actions">
+              <input
+                type="search"
+                value={aiCatalogQuery}
+                placeholder="Search accepted foods"
+                onChange={(event) => setAICatalogQuery(event.target.value)}
+              />
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={!canUseApi || isLoadingAICatalog}
+                onClick={loadAICatalog}
+              >
+                {isLoadingAICatalog ? "Refreshing..." : "Refresh"}
+              </button>
+              <button
+                className="button button-primary"
+                type="button"
+                disabled={!canUseApi || isExportingAICatalog}
+                onClick={exportAICatalogCsv}
+              >
+                {isExportingAICatalog ? "Exporting..." : "Download CSV"}
+              </button>
+            </div>
+          </div>
+
+          <div className="ai-catalog-list" role="list">
+            {!isLoadingAICatalog && filteredAICatalogItems.length === 0 ? (
+              <p className="admin-empty-state">
+                {aiCatalogQuery.trim() ? "No accepted foods match that search." : "No accepted AI foods yet."}
+              </p>
+            ) : null}
+            {filteredAICatalogItems.map((item) => (
+              <article className="ai-catalog-row" key={item.slug} role="listitem">
+                <div className="ai-catalog-name">
+                  <strong>{item.name}</strong>
+                  <span>{item.slug}</span>
+                  <span>{item.exampleServing || "Serving not specified"}</span>
+                </div>
+                <div className="ai-catalog-nutrition">
+                  <strong>{item.calories} cal</strong>
+                  <span>P {item.protein}g · C {item.carbs ?? 0}g · F {item.fat ?? 0}g</span>
+                </div>
+                <div className="ai-catalog-usage">
+                  <strong>{item.totalUses}</strong>
+                  <span>{item.totalUses === 1 ? "use" : "uses"}</span>
+                </div>
+                <span className={`image-source ${item.currentImageName ? "" : "image-source-needed"}`}>
+                  {item.currentImageName ? "Has image" : "Needs image"}
+                </span>
+                <time dateTime={item.lastAddedAt}>
+                  {item.lastAddedAt ? new Date(item.lastAddedAt).toLocaleDateString() : "—"}
+                </time>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       {selectedApp.id === "bunkr" ? (
         <section className="admin-panel taxonomy-export-panel">

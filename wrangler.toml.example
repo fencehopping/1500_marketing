@@ -8,7 +8,7 @@ bucket_name = "YOUR_R2_BUCKET_NAME"
 
 [vars]
 ALLOWED_ADMIN_EMAIL = "nickholroyd@gmail.com"
-ALLOWED_ORIGINS = "https://1500cal.app,http://localhost:5173"
+ALLOWED_ORIGINS = "https://fifteenhundred.app,http://localhost:5173"
 GOOGLE_CLIENT_ID = "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com"
 PUBLIC_IMAGES_BASE_URL = "https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.dev/images"
 PUBLIC_IMAGES_ROOT_URL = "https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.dev"
@@ -27,3 +27,6 @@ BUNKR_PUBLIC_IMAGES_BASE_URL = "https://pub-ca0d2945e40f4c42b8f7e426869cb575.r2.
 
 # Required Worker secret for /admin/export/taxonomy.csv:
 # npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+
+# Required Worker secret for recipe generation, classification, and images:
+# npx wrangler secret put OPENAI_API_KEY
