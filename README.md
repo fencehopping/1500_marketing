@@ -80,6 +80,8 @@ The 1500 recipe catalog is managed from the 1500 app in `/admin`. Recipes can st
 
 Apply `../supabase/migrations/20260903000000_catalog_recipes.sql` before enabling the catalog endpoints. The migration creates the recipe, tag, collection, version-history, and public feed objects, seeds the initial taxonomy, enables RLS, and exposes only published recipes through `catalog_recipe_feed`.
 
+Apply `../supabase/migrations/20260903195500_catalog_account_sync.sql` to keep recipes owned by `nickholroyd@gmail.com` in sync with catalog drafts. It backfills existing approved shared recipes, mirrors future inserts and edits, archives deleted or moderated source recipes, and resets changed recipes for review. The Worker cron classifies pending account imports every five minutes; publishing remains a separate manual action so source rights, images, and AI tags can be reviewed first.
+
 The iOS recipe importer calls `POST /recipe/image` after the user reviews an imported recipe. The endpoint generates a standardized square food image from the edited recipe title only; the OpenAI key remains in the Worker and is never shipped in the app.
 
 During import, `POST /recipe/nutrition` can suggest calories, protein, carbohydrates, fiber, sugar, and fat per serving from the current recipe title, servings, ingredients, and instructions. The result uses a strict numeric schema and remains fully editable before the recipe is saved.

@@ -2,6 +2,9 @@ name = "fifteen-hundred-admin-api"
 main = "worker/admin-api.mjs"
 compatibility_date = "2026-05-13"
 
+[triggers]
+crons = ["*/5 * * * *"]
+
 [[r2_buckets]]
 binding = "IMAGES_BUCKET"
 bucket_name = "YOUR_R2_BUCKET_NAME"

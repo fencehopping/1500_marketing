@@ -103,12 +103,34 @@ try {
   await generatesRecipeImage();
   await uploadsRecipeImage();
   await managesCatalogRecipes();
+  await scansAccountRecipesForAutomaticTagging();
   await exportsCsv();
   await listsAndExportsAIFoodCatalog();
   await createsOneTimeImageZipLink();
   console.log("admin-api smoke tests passed");
 } finally {
   globalThis.fetch = originalFetch;
+}
+
+async function scansAccountRecipesForAutomaticTagging() {
+  let requestedURL;
+  globalThis.fetch = async (url) => {
+    requestedURL = new URL(String(url));
+    return Response.json([]);
+  };
+
+  let scheduledWork;
+  await worker.scheduled({}, env, {
+    waitUntil(promise) {
+      scheduledWork = promise;
+    },
+  });
+  await scheduledWork;
+
+  assert.equal(requestedURL.pathname, "/rest/v1/catalog_recipes");
+  assert.equal(requestedURL.searchParams.get("status"), "eq.draft");
+  assert.equal(requestedURL.searchParams.get("tagging_status"), "eq.pending");
+  assert.equal(requestedURL.searchParams.get("source_shared_recipe_id"), "not.is.null");
 }
 
 async function analyzesMealFromTextAndPhoto() {

@@ -283,7 +283,32 @@ export default {
       Allow: allowedMethods,
     });
   },
+  async scheduled(_controller, env, ctx) {
+    ctx.waitUntil(classifyPendingAccountCatalogRecipes(env));
+  },
 };
+
+async function classifyPendingAccountCatalogRecipes(env, maximumRecipes = 10) {
+  const search = new URLSearchParams({
+    select: "id",
+    status: "eq.draft",
+    tagging_status: "eq.pending",
+    source_shared_recipe_id: "not.is.null",
+    order: "updated_at.asc",
+    limit: String(Math.max(1, Math.min(25, maximumRecipes))),
+  });
+  const recipes = await catalogRestJSON(env, "catalog_recipes", { search });
+  const results = [];
+  for (const recipe of recipes) {
+    try {
+      const response = await classifyCatalogRecipe(env, {}, recipe.id);
+      results.push({ id: recipe.id, ok: response.ok, status: response.status });
+    } catch {
+      results.push({ id: recipe.id, ok: false, status: 500 });
+    }
+  }
+  return results;
+}
 
 async function handleCatalogRecipes(request, env, headers, url) {
   const auth = await authorize(request, env, adminAuthApp(env, "1500"));
