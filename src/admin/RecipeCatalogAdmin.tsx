@@ -359,8 +359,30 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
     }
   }
 
-  async function save(nextStatus: CatalogRecipe["status"] = draft.status) {
-    if (nextStatus === "published" && publishIssues.length > 0) {
+  async function persistRecipe(recipe: CatalogRecipe, status: CatalogRecipe["status"]) {
+    const body = JSON.stringify({ ...recipe, status, expectedVersion: recipe.version });
+    const data = recipe.id
+      ? await api(`/admin/catalog/recipes/${recipe.id}`, { method: "PATCH", body }) as { recipe: CatalogRecipe }
+      : await api("/admin/catalog/recipes", { method: "POST", body }) as { recipe: CatalogRecipe };
+    return data.recipe;
+  }
+
+  async function persistTags(recipe: CatalogRecipe, tagSlugs: string[]) {
+    const data = await api(`/admin/catalog/recipes/${recipe.id}/tags`, {
+      method: "PUT",
+      body: JSON.stringify({ tagSlugs }),
+    }) as { tags: TagAssignment[]; taggingStatus: CatalogRecipe["taggingStatus"] };
+    return { ...recipe, tags: data.tags, taggingStatus: data.taggingStatus };
+  }
+
+  function applySavedRecipe(recipe: CatalogRecipe) {
+    setDraft(recipe);
+    setSelectedTags(new Set(recipe.tags.map((tag) => tag.slug)));
+    setRecipes((current) => [recipe, ...current.filter((item) => item.id !== recipe.id)]);
+  }
+
+  async function publish() {
+    if (publishIssues.length > 0) {
       const requirementCount = publishIssues.length;
       const feedback = `${requirementCount} publish ${requirementCount === 1 ? "requirement is" : "requirements are"} still incomplete. Review the checklist beside the Publish button.`;
       setActionFeedback({ kind: "error", message: feedback });
@@ -368,20 +390,57 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
       return null;
     }
     setBusy("save");
+    let latestRecipe: CatalogRecipe | null = null;
     try {
-      const body = JSON.stringify({ ...draft, status: nextStatus, expectedVersion: draft.version });
-      const data = draft.id
-        ? await api(`/admin/catalog/recipes/${draft.id}`, { method: "PATCH", body }) as { recipe: CatalogRecipe }
-        : await api("/admin/catalog/recipes", { method: "POST", body }) as { recipe: CatalogRecipe };
-      setDraft(data.recipe);
-      setSelectedTags(new Set(data.recipe.tags.map((tag) => tag.slug)));
-      setRecipes((current) => [data.recipe, ...current.filter((item) => item.id !== data.recipe.id)]);
-      const feedback = data.recipe.status === "published"
-        ? `${data.recipe.title} is published and available to the meal generator.`
-        : `${data.recipe.title} saved as ${data.recipe.status}.`;
+      let saved = await persistRecipe(draft, "draft");
+      latestRecipe = saved;
+      let approvedTagSlugs = [...selectedTags];
+
+      if (saved.taggingStatus === "pending" || saved.taggingStatus === "failed") {
+        const classification = await api(`/admin/catalog/recipes/${saved.id}/classify`, { method: "POST" }) as {
+          tags: TagAssignment[];
+          taggingStatus: CatalogRecipe["taggingStatus"];
+        };
+        saved = { ...saved, tags: classification.tags, taggingStatus: classification.taggingStatus };
+        latestRecipe = saved;
+        approvedTagSlugs = classification.tags.map((tag) => tag.slug);
+      }
+
+      saved = await persistTags(saved, approvedTagSlugs);
+      latestRecipe = saved;
+      const published = await persistRecipe(saved, "published");
+      applySavedRecipe(published);
+      const feedback = `${published.title} is published and available to the meal generator.`;
       setActionFeedback({ kind: "success", message: feedback });
       onStatus(feedback);
-      return data.recipe;
+      return published;
+    } catch (error) {
+      if (latestRecipe) applySavedRecipe(latestRecipe);
+      const feedback = message(error);
+      setActionFeedback({ kind: "error", message: feedback });
+      onStatus(feedback);
+      return null;
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function save(nextStatus: CatalogRecipe["status"] = draft.status) {
+    if (nextStatus === "published") return publish();
+    setBusy("save");
+    try {
+      let saved = await persistRecipe(draft, nextStatus);
+      const selectedTagSlugs = [...selectedTags];
+      const savedTagSlugs = saved.tags.map((tag) => tag.slug);
+      const selectionChanged = !sameStrings(selectedTagSlugs, savedTagSlugs);
+      if (nextStatus === "draft" && saved.taggingStatus !== "pending" && saved.taggingStatus !== "failed" && (saved.taggingStatus === "needs_review" || selectionChanged)) {
+        saved = await persistTags(saved, selectedTagSlugs);
+      }
+      applySavedRecipe(saved);
+      const feedback = `${saved.title} saved as ${saved.status}.${saved.taggingStatus === "pending" ? " Classification will refresh automatically when you publish." : ""}`;
+      setActionFeedback({ kind: "success", message: feedback });
+      onStatus(feedback);
+      return saved;
     } catch (error) {
       const feedback = message(error);
       setActionFeedback({ kind: "error", message: feedback });
@@ -393,38 +452,19 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
   }
 
   async function classify() {
-    let recipe = draft;
-    if (!recipe.id) {
-      const saved = await save("draft");
-      if (!saved) return;
-      recipe = saved;
-    }
     setBusy("tags");
     try {
+      const recipe = await persistRecipe(draft, "draft");
+      applySavedRecipe(recipe);
       const data = await api(`/admin/catalog/recipes/${recipe.id}/classify`, { method: "POST" }) as {
         tags: TagAssignment[];
         taggingStatus: CatalogRecipe["taggingStatus"];
       };
-      setDraft((current) => ({ ...current, tags: data.tags, taggingStatus: data.taggingStatus }));
+      const classified = { ...recipe, tags: data.tags, taggingStatus: data.taggingStatus };
+      setDraft(classified);
+      setRecipes((current) => [classified, ...current.filter((item) => item.id !== classified.id)]);
       setSelectedTags(new Set(data.tags.map((tag) => tag.slug)));
-      onStatus(`Suggested ${data.tags.length} tags. Review and pin the final selection.`);
-    } catch (error) {
-      onStatus(message(error));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function pinTags() {
-    if (!draft.id) return onStatus("Save the recipe before pinning tags.");
-    setBusy("tags");
-    try {
-      const data = await api(`/admin/catalog/recipes/${draft.id}/tags`, {
-        method: "PUT",
-        body: JSON.stringify({ tagSlugs: [...selectedTags] }),
-      }) as { tags: TagAssignment[]; taggingStatus: CatalogRecipe["taggingStatus"] };
-      setDraft((current) => ({ ...current, tags: data.tags, taggingStatus: data.taggingStatus }));
-      onStatus("The selected tags are now locked as editorial choices.");
+      onStatus(`Suggested ${data.tags.length} tags. Adjust them if needed, then save or publish.`);
     } catch (error) {
       onStatus(message(error));
     } finally {
@@ -550,7 +590,7 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
           <Field label="Notes" wide><textarea rows={4} value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></Field>
 
           <section className="recipe-tag-editor">
-            <div className="recipe-tag-heading"><div><h3>Classification</h3><p>Rule tags recalculate automatically. Pinning makes selected AI tags editorial choices.</p></div><div className="image-actions"><button className="button button-secondary" type="button" disabled={busy === "tags"} onClick={classify}>Suggest with AI</button><button className="button button-secondary" type="button" disabled={busy === "tags" || !draft.id} onClick={pinTags}>Pin selection</button></div></div>
+            <div className="recipe-tag-heading"><div><h3>Classification</h3><p>Rule tags recalculate automatically. Your selected AI tags are saved with the recipe.</p></div><div className="image-actions"><button className="button button-secondary" type="button" disabled={busy !== null} onClick={classify}>Suggest with AI</button></div></div>
             {groupedTags.map(([category, categoryTags]) => <fieldset className="recipe-choice-fieldset" key={category}><legend>{category}</legend><div className="recipe-tag-grid">
               {categoryTags.map((tag) => { const assignment = draft.tags.find((item) => item.slug === tag.slug); return <label className="recipe-tag-option" key={tag.slug} title={tag.description}><input type="checkbox" checked={selectedTags.has(tag.slug)} disabled={tag.assignmentMode === "rule" && Boolean(assignment)} onChange={() => toggleTag(tag.slug)} /><span><strong>{tag.displayName}</strong><small>{assignment?.source ?? tag.assignmentMode}{assignment?.confidence != null ? ` · ${Math.round(assignment.confidence * 100)}%` : ""}{tag.requiresReview ? " · review" : ""}</small></span></label>; })}
             </div></fieldset>)}
@@ -593,7 +633,7 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
               {publishIssues.length ? <ul>{publishIssues.map((issue) => <li key={issue}>{issue}</li>)}</ul> : <span>Publishing will make this recipe available to the meal generator.</span>}
             </div>
             {actionFeedback ? <p className={`recipe-action-feedback is-${actionFeedback.kind}`} role={actionFeedback.kind === "error" ? "alert" : "status"}>{actionFeedback.message}</p> : null}
-            <div className="recipe-editor-actions"><button className="button button-secondary" type="button" disabled={busy === "save"} onClick={() => save("draft")}>Save draft</button>{draft.id && draft.status !== "archived" ? <button className="button button-secondary button-danger" type="button" disabled={busy === "save"} onClick={() => save("archived")}>Archive</button> : null}<button className="button button-primary" type="button" disabled={busy === "save"} onClick={() => save("published")}>{busy === "save" ? "Saving…" : "Publish"}</button></div>
+            <div className="recipe-editor-actions"><button className="button button-secondary" type="button" disabled={busy !== null} onClick={() => save("draft")}>Save draft</button>{draft.id && draft.status !== "archived" ? <button className="button button-secondary button-danger" type="button" disabled={busy !== null} onClick={() => save("archived")}>Archive</button> : null}<button className="button button-primary" type="button" disabled={busy !== null} onClick={() => save("published")}>{busy === "save" ? "Saving…" : "Publish"}</button></div>
           </div>
         </div>
       </div>
@@ -633,9 +673,14 @@ function publicationIssues(recipe: CatalogRecipe) {
   if (!recipe.ingredients.some((ingredient) => ingredient.text.trim())) issues.push("Add at least one ingredient.");
   if (!recipe.instructions.some((instruction) => instruction.text.trim())) issues.push("Add at least one instruction.");
   if (recipe.caloriesPerServing <= 0) issues.push("Add calories per serving.");
-  if (recipe.taggingStatus !== "ready") issues.push("Review the suggested classification, then pin the selection.");
   if (!recipe.imageURL?.trim()) issues.push("Add or generate a recipe image.");
   return issues;
+}
+function sameStrings(left: string[], right: string[]) {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 function macroLabel(key: string) { return ({ caloriesPerServing: "Calories", proteinPerServing: "Protein g", carbsPerServing: "Carbs g", fiberPerServing: "Fiber g", sugarPerServing: "Sugar g", fatPerServing: "Fat g" } as Record<string, string>)[key]; }
 function optimizationCategoryLabel(category: string) { return category.split("_").map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" & "); }
