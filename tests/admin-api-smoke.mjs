@@ -657,6 +657,7 @@ async function managesCatalogRecipes() {
         fiberPerServing: 7,
         sugarPerServing: 5,
         fatPerServing: 16,
+        addedSugarPerServing: 2.5,
         ingredients: [{ text: "chicken breast", quantity: "1 1/2 pounds", calories: 1120 }],
         instructions: [{ text: "Cook the chicken and divide among bowls." }],
       }),
@@ -722,6 +723,19 @@ async function managesCatalogRecipes() {
   const image = await imageResponse.json();
   assert.match(image.imageURL, new RegExp(`/catalog-recipes/${recipeID}\\.png\\?v=`));
   assert.ok(await env.IMAGES_BUCKET.get(`images/catalog-recipes/${recipeID}.png`));
+
+  // PostgREST can serialize numeric columns as strings and jsonb keys in a
+  // different order. Neither representation difference should invalidate tags.
+  recipeRow = {
+    ...recipeRow,
+    added_sugar_per_serving: "2.50",
+    ingredients: recipeRow.ingredients.map((ingredient) => ({
+      quantity: ingredient.quantity,
+      calories: ingredient.calories,
+      text: ingredient.text,
+      id: ingredient.id,
+    })),
+  };
 
   const publishResponse = await worker.fetch(
     new Request(`https://worker.test/admin/catalog/recipes/${recipeID}`, {

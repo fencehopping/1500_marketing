@@ -1284,7 +1284,59 @@ function catalogClassificationInputChanged(current, next) {
     "ingredients",
     "instructions",
   ];
-  return fields.some((field) => JSON.stringify(current?.[field] ?? null) !== JSON.stringify(next?.[field] ?? null));
+  const numericFields = new Set([
+    "servings",
+    "prep_minutes",
+    "cook_minutes",
+    "calories_per_serving",
+    "protein_per_serving",
+    "carbs_per_serving",
+    "fiber_per_serving",
+    "sugar_per_serving",
+    "fat_per_serving",
+    "added_sugar_per_serving",
+    "saturated_fat_per_serving",
+    "sodium_mg_per_serving",
+    "cholesterol_mg_per_serving",
+    "potassium_mg_per_serving",
+    "calcium_mg_per_serving",
+    "iron_mg_per_serving",
+    "magnesium_mg_per_serving",
+    "zinc_mg_per_serving",
+    "selenium_mcg_per_serving",
+    "vitamin_a_mcg_per_serving",
+    "vitamin_c_mg_per_serving",
+    "vitamin_d_mcg_per_serving",
+    "vitamin_e_mg_per_serving",
+    "vitamin_k_mcg_per_serving",
+    "folate_mcg_per_serving",
+    "omega_3_g_per_serving",
+    "serving_weight_grams",
+  ]);
+  return fields.some((field) => {
+    const currentValue = normalizedComparisonValue(current?.[field], numericFields.has(field));
+    const nextValue = normalizedComparisonValue(next?.[field], numericFields.has(field));
+    return stableJSONStringify(currentValue) !== stableJSONStringify(nextValue);
+  });
+}
+
+function normalizedComparisonValue(value, numeric) {
+  if (value === undefined || value === null) return null;
+  if (!numeric) return value;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : value;
+}
+
+function stableJSONStringify(value) {
+  return JSON.stringify(stableJSONValue(value));
+}
+
+function stableJSONValue(value) {
+  if (Array.isArray(value)) return value.map(stableJSONValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value).sort().map((key) => [key, stableJSONValue(value[key])]),
+  );
 }
 
 function normalizedCatalogIngredients(value) {
