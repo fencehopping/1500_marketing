@@ -12,6 +12,12 @@ type GoogleUser = {
   email: string;
   name?: string;
   picture?: string;
+  exp?: number;
+};
+
+type AdminSession = {
+  credential: string;
+  user: GoogleUser;
 };
 
 type ImageRecord = {
@@ -66,10 +72,12 @@ const googleClientId =
 const adminApiBaseUrl =
   import.meta.env.VITE_ADMIN_API_BASE_URL ??
   "https://fifteenhundred-admin-api.fencehopping.workers.dev";
+const adminSessionStorageKey = "fifteenhundred.admin.googleCredential";
 
 export default function Admin() {
-  const [credential, setCredential] = useState<string | null>(null);
-  const [user, setUser] = useState<GoogleUser | null>(null);
+  const [initialSession] = useState<AdminSession | null>(() => readStoredAdminSession());
+  const [credential, setCredential] = useState<string | null>(initialSession?.credential ?? null);
+  const [user, setUser] = useState<GoogleUser | null>(initialSession?.user ?? null);
   const [selectedAppId, setSelectedAppId] = useState(defaultAdminApp.id);
   const [images, setImages] = useState<ImageRecord[]>([]);
   const [aiCatalogItems, setAICatalogItems] = useState<AICatalogItem[]>([]);
@@ -77,7 +85,11 @@ export default function Admin() {
   const [query, setQuery] = useState("");
   const [keyword, setKeyword] = useState("");
   const [file, setFile] = useState<File | null>(null);
-  const [status, setStatus] = useState("Sign in with Google to manage Cloudflare images.");
+  const [status, setStatus] = useState(
+    initialSession
+      ? `Signed in as ${initialSession.user.email}.`
+      : "Sign in with Google to manage Cloudflare images.",
+  );
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isExportingTaxonomy, setIsExportingTaxonomy] = useState(false);
@@ -187,9 +199,20 @@ export default function Admin() {
       return;
     }
 
-    const decodedUser = decodeGoogleUser(response.credential);
+    let decodedUser: GoogleUser;
+    try {
+      decodedUser = decodeGoogleUser(response.credential);
+    } catch {
+      setStatus("Google returned an invalid sign-in token. Please sign in again.");
+      return;
+    }
     setCredential(response.credential);
     setUser(decodedUser);
+    try {
+      window.sessionStorage.setItem(adminSessionStorageKey, response.credential);
+    } catch {
+      // The admin remains signed in for this page even if storage is unavailable.
+    }
 
     const credentialApp = selectedAppRef.current;
     if (!credentialApp.allowedAdminEmails.includes(decodedUser.email)) {
@@ -737,6 +760,24 @@ function decodeGoogleUser(credential: string): GoogleUser {
   const paddedPayload = normalizedPayload.padEnd(normalizedPayload.length + ((4 - (normalizedPayload.length % 4)) % 4), "=");
   const decodedPayload = JSON.parse(window.atob(paddedPayload)) as GoogleUser;
   return decodedPayload;
+}
+
+function readStoredAdminSession(): AdminSession | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const credential = window.sessionStorage.getItem(adminSessionStorageKey);
+    if (!credential) return null;
+    const user = decodeGoogleUser(credential);
+    const expiresAt = Number(user.exp ?? 0) * 1_000;
+    if (!user.email || !expiresAt || expiresAt <= Date.now() + 30_000) {
+      window.sessionStorage.removeItem(adminSessionStorageKey);
+      return null;
+    }
+    return { credential, user };
+  } catch {
+    window.sessionStorage.removeItem(adminSessionStorageKey);
+    return null;
+  }
 }
 
 function csvCell(value: string) {

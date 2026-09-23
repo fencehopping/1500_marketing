@@ -1194,7 +1194,10 @@ function normalizeCatalogRecipe(body, { id, creating, current = null }) {
 
   return {
     ...(creating ? { id } : {}),
-    slug: slugify(String(body?.slug ?? current?.slug ?? title)) || `recipe-${id.slice(0, 8)}`,
+    // Slugs are stable identifiers once a recipe exists. Never let a stale or
+    // forged editor payload rename one and collide with another catalog row.
+    slug: slugify(String(creating ? (body?.slug ?? title) : (current?.slug ?? body?.slug ?? title)))
+      || `recipe-${id.slice(0, 8)}`,
     status,
     title,
     summary: String(body?.summary ?? current?.summary ?? "").trim().slice(0, 600),
@@ -1416,6 +1419,7 @@ async function loadCatalogAssignments(env, recipeIDs) {
 async function saveCatalogVersion(env, recipe, editorEmail) {
   await catalogRestJSON(env, "catalog_recipe_versions", {
     method: "POST",
+    search: new URLSearchParams({ on_conflict: "recipe_id,version" }),
     body: {
       recipe_id: recipe.id,
       version: recipe.version,
@@ -1600,8 +1604,15 @@ async function catalogRestJSON(env, table, options = {}) {
   });
   if (!response.ok) {
     const message = await response.text();
-    if (response.status === 409 || /duplicate key|unique constraint/i.test(message)) {
+    const isUniqueConflict = response.status === 409 || /duplicate key|unique constraint/i.test(message);
+    const isRecipeSlugConflict = table === "catalog_recipes"
+      && isUniqueConflict
+      && /slug|catalog_recipes_slug_key/i.test(message);
+    if (isRecipeSlugConflict) {
       throw new CatalogAPIError(409, "A catalog recipe already uses that slug.");
+    }
+    if (isUniqueConflict) {
+      throw new CatalogAPIError(409, "This catalog record changed while it was being saved. Refresh and try again.");
     }
     throw new CatalogAPIError(response.status >= 500 ? 502 : response.status, `Catalog database request failed: ${message}`);
   }

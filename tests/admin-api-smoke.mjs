@@ -604,6 +604,7 @@ async function managesCatalogRecipes() {
       return Response.json(recipeRow ? [recipeRow] : []);
     }
     if (requestURL.pathname === "/rest/v1/catalog_recipe_versions") {
+      assert.equal(requestURL.searchParams.get("on_conflict"), "recipe_id,version");
       return new Response(null, { status: 204 });
     }
     if (requestURL.pathname === "/rest/v1/catalog_tags") {
@@ -675,6 +676,7 @@ async function managesCatalogRecipes() {
       headers,
       body: JSON.stringify({
         ...created.recipe,
+        slug: "another-recipe-that-already-exists",
         status: "published",
         expectedVersion: 1,
         taggingStatus: "ready",
@@ -736,7 +738,9 @@ async function managesCatalogRecipes() {
     env,
   );
   assert.equal(publishResponse.status, 200);
-  assert.equal((await publishResponse.json()).recipe.status, "published");
+  const published = await publishResponse.json();
+  assert.equal(published.recipe.status, "published");
+  assert.equal(published.recipe.slug, created.recipe.slug);
 }
 
 async function rejectsMissingAuth() {
