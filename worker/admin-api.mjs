@@ -827,34 +827,18 @@ OPTIONAL EDITOR NOTES:
 ${brief || "No additional preferences."}`;
 
   let openAIResponse;
+  let payload;
   try {
-    openAIResponse = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-5.4-mini",
-        reasoning: { effort: "medium" },
-        input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
-        text: {
-          format: {
-            type: "json_schema",
-            name: "catalog_recipe_draft",
-            strict: true,
-            schema: catalogGeneratedRecipeSchema(),
-          },
-        },
-        max_output_tokens: 6_000,
-        store: false,
-      }),
-    });
+    openAIResponse = await requestCatalogRecipeDraft(env.OPENAI_API_KEY, prompt, "low", 8_000);
+    payload = await openAIResponse.json().catch(() => null);
+    if (openAIResponse.ok && catalogRecipeDraftWasTruncated(payload)) {
+      openAIResponse = await requestCatalogRecipeDraft(env.OPENAI_API_KEY, prompt, "minimal", 10_000);
+      payload = await openAIResponse.json().catch(() => null);
+    }
   } catch {
     return json({ error: "The recipe could not be generated right now." }, 502, headers);
   }
 
-  const payload = await openAIResponse.json().catch(() => null);
   let recipe;
   try {
     recipe = JSON.parse(responseOutputText(payload));
@@ -863,7 +847,7 @@ ${brief || "No additional preferences."}`;
   }
   if (!openAIResponse.ok || !validFlexibleRecipe(recipe)) {
     return json(
-      { error: openAIErrorMessage(payload) ?? "The recipe generator returned an invalid draft." },
+      { error: catalogRecipeGenerationErrorMessage(payload) },
       502,
       headers,
     );
@@ -874,6 +858,52 @@ ${brief || "No additional preferences."}`;
     200,
     { ...headers, "Cache-Control": "no-store" },
   );
+}
+
+function requestCatalogRecipeDraft(openAIKey, prompt, reasoningEffort, maxOutputTokens) {
+  return fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${openAIKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-5.4-mini",
+      reasoning: { effort: reasoningEffort },
+      input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "catalog_recipe_draft",
+          strict: true,
+          schema: catalogGeneratedRecipeSchema(),
+        },
+      },
+      max_output_tokens: maxOutputTokens,
+      store: false,
+    }),
+  });
+}
+
+function catalogRecipeDraftWasTruncated(payload) {
+  return payload?.status === "incomplete" && payload?.incomplete_details?.reason === "max_output_tokens";
+}
+
+function catalogRecipeGenerationErrorMessage(payload) {
+  if (catalogRecipeDraftWasTruncated(payload)) {
+    return "The recipe was too detailed to finish. Try selecting fewer goals or shortening the optional notes.";
+  }
+  const refusal = (payload?.output ?? [])
+    .flatMap((item) => item?.content ?? [])
+    .find((content) => content?.type === "refusal")?.refusal;
+  if (typeof refusal === "string" && refusal.trim()) {
+    return "The recipe request could not be completed. Adjust the selected goals or optional notes and try again.";
+  }
+  const apiMessage = payload?.error?.message;
+  if (typeof apiMessage === "string" && apiMessage.trim()) {
+    return `Recipe generation failed: ${apiMessage.trim().slice(0, 300)}`;
+  }
+  return "The recipe generator returned an invalid draft. Please try again.";
 }
 
 async function classifyCatalogRecipe(env, headers, recipeID) {

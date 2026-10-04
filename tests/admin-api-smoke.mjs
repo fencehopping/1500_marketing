@@ -618,7 +618,7 @@ async function generatesCatalogRecipeFromGoals() {
       is_user_facing: true,
     },
   ];
-  let responseRequestBody;
+  const responseRequestBodies = [];
   globalThis.fetch = async (url, options = {}) => {
     const requestURL = new URL(String(url));
     if (requestURL.hostname === "oauth2.googleapis.com") {
@@ -632,8 +632,16 @@ async function generatesCatalogRecipeFromGoals() {
       return Response.json(filterRows);
     }
     assert.equal(String(url), "https://api.openai.com/v1/responses");
-    responseRequestBody = JSON.parse(options.body);
+    responseRequestBodies.push(JSON.parse(options.body));
+    if (responseRequestBodies.length === 1) {
+      return Response.json({
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        output: [{ type: "reasoning" }],
+      });
+    }
     return Response.json({
+      status: "completed",
       output: [{ content: [{ type: "output_text", text: JSON.stringify(generatedRecipe) }] }],
     });
   };
@@ -660,13 +668,18 @@ async function generatesCatalogRecipeFromGoals() {
   assert.deepEqual(payload.recipe.mealTypes, ["lunch"]);
   assert.equal(payload.recipe.sourceType, "ai");
   assert.equal(payload.recipe.sodiumMgPerServing, 510);
-  assert.equal(responseRequestBody.model, "gpt-5.4-mini");
-  assert.equal(responseRequestBody.text.format.strict, true);
-  assert.ok(responseRequestBody.text.format.schema.required.includes("servingWeightGrams"));
-  assert.match(responseRequestBody.input[0].content[0].text, /lunch recipe draft/i);
-  assert.match(responseRequestBody.input[0].content[0].text, /High Protein/);
-  assert.match(responseRequestBody.input[0].content[0].text, /Mediterranean Style/);
-  assert.match(responseRequestBody.input[0].content[0].text, /Keep it dairy-light/);
+  assert.equal(responseRequestBodies.length, 2);
+  assert.equal(responseRequestBodies[0].model, "gpt-5.4-mini");
+  assert.equal(responseRequestBodies[0].reasoning.effort, "low");
+  assert.equal(responseRequestBodies[0].max_output_tokens, 8_000);
+  assert.equal(responseRequestBodies[1].reasoning.effort, "minimal");
+  assert.equal(responseRequestBodies[1].max_output_tokens, 10_000);
+  assert.equal(responseRequestBodies[1].text.format.strict, true);
+  assert.ok(responseRequestBodies[1].text.format.schema.required.includes("servingWeightGrams"));
+  assert.match(responseRequestBodies[1].input[0].content[0].text, /lunch recipe draft/i);
+  assert.match(responseRequestBodies[1].input[0].content[0].text, /High Protein/);
+  assert.match(responseRequestBodies[1].input[0].content[0].text, /Mediterranean Style/);
+  assert.match(responseRequestBodies[1].input[0].content[0].text, /Keep it dairy-light/);
 }
 
 async function managesCatalogRecipes() {
