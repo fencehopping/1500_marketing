@@ -3,10 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Fifteen Hundred</title>
+    <meta name="robots" content="noindex" />
+    <title>Redirecting…</title>
     <script>
-      const path = window.location.pathname + window.location.search + window.location.hash;
-      window.location.replace("/?redirect=" + encodeURIComponent(path));
+      const requestedPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      window.location.replace(`/?redirect=${encodeURIComponent(requestedPath)}`);
     </script>
   </head>
   <body></body>
