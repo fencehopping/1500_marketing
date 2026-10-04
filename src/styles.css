@@ -1512,6 +1512,44 @@ h3 {
   gap: 10px;
 }
 
+.recipe-ai-targets {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(34, 116, 54, 0.28);
+  border-radius: 13px;
+  background: rgba(84, 211, 102, 0.11);
+  font-size: 11px;
+}
+
+.recipe-ai-targets > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.recipe-ai-targets span,
+.recipe-score-card strong small,
+.recipe-filter-row summary strong em {
+  display: inline-flex;
+  margin-left: 6px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--green-dark);
+  color: #fff;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.recipe-ai-targets span {
+  margin-left: 0;
+  font-size: 9px;
+  text-transform: none;
+}
+
 .recipe-score-card,
 .recipe-filter-row {
   min-width: 0;
@@ -1524,6 +1562,12 @@ h3 {
 .recipe-score-card.is-overridden {
   border-color: rgba(245, 158, 11, 0.55);
   box-shadow: inset 3px 0 #f59e0b;
+}
+
+.recipe-score-card.is-ai-target,
+.recipe-filter-row.is-ai-target {
+  border-color: rgba(34, 116, 54, 0.42);
+  box-shadow: inset 3px 0 var(--green-dark);
 }
 
 .recipe-score-card > div:first-child,

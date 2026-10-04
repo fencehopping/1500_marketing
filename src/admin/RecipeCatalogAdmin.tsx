@@ -99,6 +99,7 @@ type CatalogRecipe = {
   folateMcgPerServing: number | null;
   omega3GPerServing: number | null;
   servingWeightGrams: number | null;
+  dietaryMetadata: Record<string, unknown>;
   ingredients: Ingredient[];
   instructions: Instruction[];
   notes: string;
@@ -174,6 +175,8 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
   const [busy, setBusy] = useState<"load" | "source" | "save" | "tags" | "image" | "optimization" | "filters" | null>(null);
   const [actionFeedback, setActionFeedback] = useState<ActionFeedback | null>(null);
 
+  const aiTargetGoalSlugs = useMemo(() => new Set(recipeAIGoalSlugs(draft)), [draft.dietaryMetadata]);
+
   const groupedTags = useMemo(() => {
     const groups = new Map<string, CatalogTag[]>();
     tags.forEach((tag) => groups.set(tag.category, [...(groups.get(tag.category) ?? []), tag]));
@@ -183,10 +186,14 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
   const visibleOptimizationFilters = useMemo(() => optimizationFilters.filter((filter) => {
     const matchesQuery = !optimizationQuery.trim() || `${filter.label} ${filter.slug} ${filter.description}`.toLowerCase().includes(optimizationQuery.trim().toLowerCase());
     return matchesQuery && (optimizationCategory === "all" || filter.category === optimizationCategory);
-  }), [optimizationFilters, optimizationQuery, optimizationCategory]);
+  }).sort((left, right) => Number(aiTargetGoalSlugs.has(right.slug)) - Number(aiTargetGoalSlugs.has(left.slug))), [optimizationFilters, optimizationQuery, optimizationCategory, aiTargetGoalSlugs]);
 
   const optimizationCategories = useMemo(() => [...new Set(optimizationFilters.map((filter) => filter.category))], [optimizationFilters]);
   const scoresByFilter = useMemo(() => new Map(optimizationScores.map((score) => [score.filterID, score])), [optimizationScores]);
+  const displayedOptimizationScores = useMemo(() => [...optimizationScores].sort((left, right) => {
+    const targetDifference = Number(aiTargetGoalSlugs.has(right.slug)) - Number(aiTargetGoalSlugs.has(left.slug));
+    return targetDifference || right.score - left.score;
+  }), [optimizationScores, aiTargetGoalSlugs]);
   const publishIssues = useMemo(() => publicationIssues(draft), [draft]);
   const aiGoalGroups = useMemo(() => {
     const query = aiGoalQuery.trim().toLowerCase();
@@ -298,15 +305,22 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
     }
     setBusy("optimization");
     try {
-      const data = await api(`/admin/catalog/recipes/${recipe.id}/optimization`, { method: "POST" }) as { scores: OptimizationScore[] };
+      const data = await calculateOptimization(recipe.id);
       setOptimizationScores(data.scores);
-      setDraft((current) => ({ ...current, optimizationStatus: "ready" }));
+      setDraft((current) => ({ ...current, optimizationStatus: data.optimizationStatus }));
       onStatus(`Calculated ${data.scores.length} optimization scores.`);
     } catch (error) {
       onStatus(message(error));
     } finally {
       setBusy(null);
     }
+  }
+
+  async function calculateOptimization(recipeID: string) {
+    return api(`/admin/catalog/recipes/${recipeID}/optimization`, { method: "POST" }) as Promise<{
+      optimizationStatus: CatalogRecipe["optimizationStatus"];
+      scores: OptimizationScore[];
+    }>;
   }
 
   async function updateOptimizationFilter(filter: OptimizationFilter, change: Partial<OptimizationFilter>) {
@@ -412,15 +426,23 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
     setBusy("source");
     setAIGeneratorError("");
     try {
+      const requestedGoalSlugs = [...aiGoalSlugs];
       const data = await api("/admin/catalog/recipes/generate", {
         method: "POST",
         body: JSON.stringify({
           mealType: aiMealType,
-          goalSlugs: [...aiGoalSlugs],
+          goalSlugs: requestedGoalSlugs,
           brief: aiBrief,
         }),
       }) as { recipe: ImportedRecipe };
-      setDraft((current) => mergeImport(current, data.recipe, "ai"));
+      setDraft((current) => {
+        const imported = mergeImport(current, data.recipe, "ai");
+        return {
+          ...imported,
+          dietaryMetadata: { ...imported.dietaryMetadata, aiGoalSlugs: requestedGoalSlugs },
+          optimizationStatus: "pending",
+        };
+      });
       setSelectedTags(new Set());
       setOptimizationScores([]);
       setActionFeedback(null);
@@ -484,6 +506,10 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
 
       saved = await persistTags(saved, approvedTagSlugs);
       latestRecipe = saved;
+      const optimization = await calculateOptimization(saved.id);
+      setOptimizationScores(optimization.scores);
+      saved = { ...saved, optimizationStatus: optimization.optimizationStatus };
+      latestRecipe = saved;
       const published = await persistRecipe(saved, "published");
       applySavedRecipe(published);
       const feedback = `${published.title} is published and available to the meal generator.`;
@@ -511,6 +537,11 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
       const selectionChanged = !sameStrings(selectedTagSlugs, savedTagSlugs);
       if (nextStatus === "draft" && saved.taggingStatus !== "pending" && saved.taggingStatus !== "failed" && (saved.taggingStatus === "needs_review" || selectionChanged)) {
         saved = await persistTags(saved, selectedTagSlugs);
+      }
+      if (saved.sourceType === "ai") {
+        const optimization = await calculateOptimization(saved.id);
+        setOptimizationScores(optimization.scores);
+        saved = { ...saved, optimizationStatus: optimization.optimizationStatus };
       }
       applySavedRecipe(saved);
       const feedback = `${saved.title} saved as ${saved.status}.${saved.taggingStatus === "pending" ? " Classification will refresh automatically when you publish." : ""}`;
@@ -679,9 +710,11 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
               <button className="button button-secondary" type="button" disabled={busy === "optimization" || !draft.title.trim()} onClick={recalculateOptimization}>{busy === "optimization" ? "Calculating…" : "Recalculate scores"}</button>
             </div>
 
-            {optimizationScores.length ? <div className="recipe-optimization-top">
-              {optimizationScores.slice(0, 6).map((score) => <article key={score.filterID} className={`recipe-score-card ${score.isOverridden ? "is-overridden" : ""}`}>
-                <div><strong>{score.label}</strong><span>{Math.round(score.score)}</span></div>
+            {aiTargetGoalSlugs.size ? <div className="recipe-ai-targets"><strong>AI generation targets</strong><div>{optimizationFilters.filter((filter) => aiTargetGoalSlugs.has(filter.slug)).map((filter) => <span key={filter.id}>{filter.label}</span>)}</div></div> : null}
+
+            {displayedOptimizationScores.length ? <div className="recipe-optimization-top">
+              {displayedOptimizationScores.slice(0, Math.max(6, aiTargetGoalSlugs.size)).map((score) => <article key={score.filterID} className={`recipe-score-card ${score.isOverridden ? "is-overridden" : ""} ${aiTargetGoalSlugs.has(score.slug) ? "is-ai-target" : ""}`}>
+                <div><strong>{score.label}{aiTargetGoalSlugs.has(score.slug) ? <small>AI target</small> : null}</strong><span>{Math.round(score.score)}</span></div>
                 <small>{Math.round(score.confidence * 100)}% confidence · v{score.scoringVersion}{score.isOverridden ? " · manual override" : ""}</small>
                 {score.reasons.length ? <ul>{score.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul> : <p>No strong reason codes with current inputs.</p>}
                 <details><summary>Inputs & calculation</summary><pre>{JSON.stringify({ calculatedScore: score.calculatedScore, inputs: score.inputs, overrideReason: score.overrideReason }, null, 2)}</pre></details>
@@ -694,8 +727,8 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
               <div className="recipe-catalog-filters"><input type="search" value={optimizationQuery} placeholder="Search filters" onChange={(event) => setOptimizationQuery(event.target.value)} /><select value={optimizationCategory} onChange={(event) => setOptimizationCategory(event.target.value)}><option value="all">All categories</option>{optimizationCategories.map((category) => <option value={category} key={category}>{optimizationCategoryLabel(category)}</option>)}</select></div>
             </div>
             <div className="recipe-filter-manager">
-              {visibleOptimizationFilters.map((filter) => { const score = scoresByFilter.get(filter.id); return <details className="recipe-filter-row" key={filter.id}>
-                <summary><span><strong>{filter.label}</strong><small>{optimizationCategoryLabel(filter.category)} · {filter.scoringMode} · v{filter.scoringVersion}</small></span><b>{score ? Math.round(score.score) : "—"}</b></summary>
+              {visibleOptimizationFilters.map((filter) => { const score = scoresByFilter.get(filter.id); const isAITarget = aiTargetGoalSlugs.has(filter.slug); return <details className={`recipe-filter-row ${isAITarget ? "is-ai-target" : ""}`} key={filter.id}>
+                <summary><span><strong>{filter.label}{isAITarget ? <em>AI target</em> : null}</strong><small>{optimizationCategoryLabel(filter.category)} · {filter.scoringMode} · v{filter.scoringVersion}</small></span><b>{score ? Math.round(score.score) : "—"}</b></summary>
                 <p>{filter.description}</p>
                 <div className="recipe-filter-toggles"><label><input type="checkbox" checked={filter.isActive} disabled={busy === "filters"} onChange={(event) => updateOptimizationFilter(filter, { isActive: event.target.checked })} />Active</label><label><input type="checkbox" checked={filter.isUserFacing} disabled={busy === "filters"} onChange={(event) => updateOptimizationFilter(filter, { isUserFacing: event.target.checked })} />User-facing</label></div>
                 <pre>{JSON.stringify({ scoringDefinition: filter.scoringDefinition, minimumNutritionDataRequired: filter.minimumNutritionDataRequired }, null, 2)}</pre>
@@ -763,11 +796,16 @@ function NullableNumberInput({ value, onChange }: { value: number | null; onChan
 }
 
 function emptyRecipe(): CatalogRecipe {
-  return { id: "", slug: "", status: "draft", title: "", summary: "", sourceType: "manual", sourceURL: "", sourceAttribution: "", rightsStatus: "pending", mealTypes: [], servings: 1, portionDescription: "", prepMinutes: 0, cookMinutes: 0, caloriesPerServing: 0, proteinPerServing: 0, carbsPerServing: 0, fiberPerServing: 0, sugarPerServing: 0, fatPerServing: 0, addedSugarPerServing: null, saturatedFatPerServing: null, sodiumMgPerServing: null, cholesterolMgPerServing: null, potassiumMgPerServing: null, calciumMgPerServing: null, ironMgPerServing: null, magnesiumMgPerServing: null, zincMgPerServing: null, seleniumMcgPerServing: null, vitaminAMcgPerServing: null, vitaminCMgPerServing: null, vitaminDMcgPerServing: null, vitaminEMgPerServing: null, vitaminKMcgPerServing: null, folateMcgPerServing: null, omega3GPerServing: null, servingWeightGrams: null, ingredients: [], instructions: [], notes: "", imageURL: null, imageAltText: "", editorialPriority: 0, taggingStatus: "pending", optimizationStatus: "pending", version: 1, tags: [] };
+  return { id: "", slug: "", status: "draft", title: "", summary: "", sourceType: "manual", sourceURL: "", sourceAttribution: "", rightsStatus: "pending", mealTypes: [], servings: 1, portionDescription: "", prepMinutes: 0, cookMinutes: 0, caloriesPerServing: 0, proteinPerServing: 0, carbsPerServing: 0, fiberPerServing: 0, sugarPerServing: 0, fatPerServing: 0, addedSugarPerServing: null, saturatedFatPerServing: null, sodiumMgPerServing: null, cholesterolMgPerServing: null, potassiumMgPerServing: null, calciumMgPerServing: null, ironMgPerServing: null, magnesiumMgPerServing: null, zincMgPerServing: null, seleniumMcgPerServing: null, vitaminAMcgPerServing: null, vitaminCMgPerServing: null, vitaminDMcgPerServing: null, vitaminEMgPerServing: null, vitaminKMcgPerServing: null, folateMcgPerServing: null, omega3GPerServing: null, servingWeightGrams: null, dietaryMetadata: {}, ingredients: [], instructions: [], notes: "", imageURL: null, imageAltText: "", editorialPriority: 0, taggingStatus: "pending", optimizationStatus: "pending", version: 1, tags: [] };
 }
 
 function mergeImport(current: CatalogRecipe, imported: ImportedRecipe, mode: "url" | "text" | "ai"): CatalogRecipe {
-  return { ...current, title: imported.title, summary: imported.summary ?? "", sourceType: imported.sourceType ?? mode, sourceURL: imported.sourceURL ?? (mode === "url" ? current.sourceURL : ""), mealTypes: imported.mealTypes ?? current.mealTypes, servings: imported.servings ?? 1, portionDescription: imported.portionDescription ?? "", prepMinutes: imported.prepMinutes ?? 0, cookMinutes: imported.cookMinutes ?? 0, caloriesPerServing: imported.caloriesPerServing ?? 0, proteinPerServing: imported.proteinPerServing ?? 0, carbsPerServing: imported.carbsPerServing ?? 0, fiberPerServing: imported.fiberPerServing ?? 0, sugarPerServing: imported.sugarPerServing ?? 0, fatPerServing: imported.fatPerServing ?? 0, addedSugarPerServing: imported.addedSugarPerServing ?? null, saturatedFatPerServing: imported.saturatedFatPerServing ?? null, sodiumMgPerServing: imported.sodiumMgPerServing ?? null, cholesterolMgPerServing: imported.cholesterolMgPerServing ?? null, potassiumMgPerServing: imported.potassiumMgPerServing ?? null, calciumMgPerServing: imported.calciumMgPerServing ?? null, ironMgPerServing: imported.ironMgPerServing ?? null, magnesiumMgPerServing: imported.magnesiumMgPerServing ?? null, zincMgPerServing: imported.zincMgPerServing ?? null, seleniumMcgPerServing: imported.seleniumMcgPerServing ?? null, vitaminAMcgPerServing: imported.vitaminAMcgPerServing ?? null, vitaminCMgPerServing: imported.vitaminCMgPerServing ?? null, vitaminDMcgPerServing: imported.vitaminDMcgPerServing ?? null, vitaminEMgPerServing: imported.vitaminEMgPerServing ?? null, vitaminKMcgPerServing: imported.vitaminKMcgPerServing ?? null, folateMcgPerServing: imported.folateMcgPerServing ?? null, omega3GPerServing: imported.omega3GPerServing ?? null, servingWeightGrams: imported.servingWeightGrams ?? null, ingredients: imported.ingredients.map((item) => ({ id: item.id, text: item.text ?? item.name ?? "", quantity: item.quantity ?? "", calories: item.calories ?? 0 })), instructions: imported.instructions.map((item) => ({ id: typeof item === "string" ? undefined : item.id, text: typeof item === "string" ? item : item.text })), notes: imported.notes ?? "" };
+  return { ...current, title: imported.title, summary: imported.summary ?? "", sourceType: imported.sourceType ?? mode, sourceURL: imported.sourceURL ?? (mode === "url" ? current.sourceURL : ""), mealTypes: imported.mealTypes ?? current.mealTypes, servings: imported.servings ?? 1, portionDescription: imported.portionDescription ?? "", prepMinutes: imported.prepMinutes ?? 0, cookMinutes: imported.cookMinutes ?? 0, caloriesPerServing: imported.caloriesPerServing ?? 0, proteinPerServing: imported.proteinPerServing ?? 0, carbsPerServing: imported.carbsPerServing ?? 0, fiberPerServing: imported.fiberPerServing ?? 0, sugarPerServing: imported.sugarPerServing ?? 0, fatPerServing: imported.fatPerServing ?? 0, addedSugarPerServing: imported.addedSugarPerServing ?? null, saturatedFatPerServing: imported.saturatedFatPerServing ?? null, sodiumMgPerServing: imported.sodiumMgPerServing ?? null, cholesterolMgPerServing: imported.cholesterolMgPerServing ?? null, potassiumMgPerServing: imported.potassiumMgPerServing ?? null, calciumMgPerServing: imported.calciumMgPerServing ?? null, ironMgPerServing: imported.ironMgPerServing ?? null, magnesiumMgPerServing: imported.magnesiumMgPerServing ?? null, zincMgPerServing: imported.zincMgPerServing ?? null, seleniumMcgPerServing: imported.seleniumMcgPerServing ?? null, vitaminAMcgPerServing: imported.vitaminAMcgPerServing ?? null, vitaminCMgPerServing: imported.vitaminCMgPerServing ?? null, vitaminDMcgPerServing: imported.vitaminDMcgPerServing ?? null, vitaminEMgPerServing: imported.vitaminEMgPerServing ?? null, vitaminKMcgPerServing: imported.vitaminKMcgPerServing ?? null, folateMcgPerServing: imported.folateMcgPerServing ?? null, omega3GPerServing: imported.omega3GPerServing ?? null, servingWeightGrams: imported.servingWeightGrams ?? null, dietaryMetadata: imported.dietaryMetadata ?? current.dietaryMetadata, ingredients: imported.ingredients.map((item) => ({ id: item.id, text: item.text ?? item.name ?? "", quantity: item.quantity ?? "", calories: item.calories ?? 0 })), instructions: imported.instructions.map((item) => ({ id: typeof item === "string" ? undefined : item.id, text: typeof item === "string" ? item : item.text })), notes: imported.notes ?? "" };
+}
+
+function recipeAIGoalSlugs(recipe: CatalogRecipe) {
+  const value = recipe.dietaryMetadata?.aiGoalSlugs;
+  return Array.isArray(value) ? value.map((slug) => String(slug)).filter(Boolean) : [];
 }
 
 function ingredientsText(ingredients: Ingredient[]) { return ingredients.map((item) => `${item.quantity} | ${item.text} | ${item.calories}`).join("\n"); }
