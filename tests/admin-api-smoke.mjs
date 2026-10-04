@@ -100,8 +100,10 @@ try {
   await loadsXRecipeMetadata();
   await analyzesXRecipeVideo();
   await generatesRecipeNutrition();
+  await generatesCatalogRecipeFromGoals();
   await generatesRecipeImage();
   await uploadsRecipeImage();
+  await uploadsPersonalFoodImage();
   await managesCatalogRecipes();
   await scansAccountRecipesForAutomaticTagging();
   await exportsCsv();
@@ -423,7 +425,7 @@ async function generatesRecipeImage() {
     imageBase64: "aGVsbG8=",
     mimeType: "image/png",
   });
-  assert.equal(requestBody.model, "gpt-image-2");
+  assert.equal(requestBody.model, "gpt-image-2.5-flare");
   assert.equal(requestBody.size, "1024x1024");
   assert.equal(requestBody.quality, "medium");
   assert.equal(requestBody.background, "transparent");
@@ -475,6 +477,44 @@ async function uploadsRecipeImage() {
   assert.deepEqual(new Uint8Array(await stored.arrayBuffer()), pngBytes);
 }
 
+async function uploadsPersonalFoodImage() {
+  globalThis.fetch = async (url, options) => {
+    assert.equal(String(url), "https://example.supabase.co/auth/v1/user");
+    assert.equal(options.headers.Authorization, "Bearer test-user-token");
+    return Response.json({ id: "3d794540-8e74-4fb0-8205-aaf680bd44bc" });
+  };
+
+  const foodId = "8e80b924-c32d-4a7b-8585-33c4878e32cb";
+  const ownerId = "3d794540-8e74-4fb0-8205-aaf680bd44bc";
+  const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 4, 5, 6]);
+  const response = await worker.fetch(
+    new Request("https://worker.test/food/image/upload", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer test-user-token",
+        Origin: "https://fifteenhundred.app",
+      },
+      body: JSON.stringify({
+        foodId,
+        title: "Venti iced vanilla latte",
+        imageBase64: Buffer.from(pngBytes).toString("base64"),
+      }),
+    }),
+    env,
+  );
+
+  assert.equal(response.status, 201);
+  const payload = await response.json();
+  assert.match(
+    payload.imageURL,
+    new RegExp(`^https://cdn\\.example\\.test/images/foods/${ownerId}/${foodId}\\.png\\?v=\\d+$`),
+  );
+  const stored = await env.IMAGES_BUCKET.get(`images/foods/${ownerId}/${foodId}.png`);
+  assert.ok(stored);
+  assert.deepEqual(new Uint8Array(await stored.arrayBuffer()), pngBytes);
+}
+
 async function generatesRecipeNutrition() {
   const nutrition = {
     caloriesPerServing: 420,
@@ -520,6 +560,113 @@ async function generatesRecipeNutrition() {
   assert.match(requestBody.input[0].content[0].text, /1 tablespoon olive oil/);
   assert.match(requestBody.input[0].content[0].text, /exactly the same order/);
   assert.match(requestBody.input[0].content[0].text, /greater than zero/);
+}
+
+async function generatesCatalogRecipeFromGoals() {
+  const generatedRecipe = {
+    title: "Lemony Salmon Grain Bowl",
+    summary: "A bright salmon and quinoa lunch with vegetables and a yogurt herb sauce.",
+    servings: 2,
+    portionDescription: "1 generous bowl",
+    prepMinutes: 15,
+    cookMinutes: 20,
+    caloriesPerServing: 485,
+    proteinPerServing: 38,
+    carbsPerServing: 42,
+    fiberPerServing: 8,
+    sugarPerServing: 7,
+    fatPerServing: 19,
+    addedSugarPerServing: 0,
+    saturatedFatPerServing: 4,
+    sodiumMgPerServing: 510,
+    cholesterolMgPerServing: 70,
+    potassiumMgPerServing: 920,
+    calciumMgPerServing: 180,
+    ironMgPerServing: 4,
+    magnesiumMgPerServing: 150,
+    zincMgPerServing: 3,
+    seleniumMcgPerServing: 48,
+    vitaminAMcgPerServing: 420,
+    vitaminCMgPerServing: 38,
+    vitaminDMcgPerServing: 9,
+    vitaminEMgPerServing: 4,
+    vitaminKMcgPerServing: 95,
+    folateMcgPerServing: 160,
+    omega3GPerServing: 1.8,
+    servingWeightGrams: 510,
+    ingredients: [{ name: "salmon fillets", quantity: "10 ounces", calories: 590 }],
+    instructions: ["Roast the salmon and assemble the bowls."],
+    notes: "Nutrition is an estimate per serving.",
+  };
+  const filterRows = [
+    {
+      id: "filter-high-protein",
+      slug: "high-protein",
+      label: "High Protein",
+      description: "Prioritizes protein density per 100 calories.",
+      scoring_definition: { field: "protein_per_100_calories", target: 8 },
+      is_active: true,
+      is_user_facing: true,
+    },
+    {
+      id: "filter-mediterranean",
+      slug: "mediterranean-style",
+      label: "Mediterranean Style",
+      description: "Emphasizes vegetables, legumes, whole grains, fish, and olive oil.",
+      scoring_definition: { signals: ["olive oil", "fish", "whole grains"] },
+      is_active: true,
+      is_user_facing: true,
+    },
+  ];
+  let responseRequestBody;
+  globalThis.fetch = async (url, options = {}) => {
+    const requestURL = new URL(String(url));
+    if (requestURL.hostname === "oauth2.googleapis.com") {
+      return Response.json({ email: "nickholroyd@gmail.com", email_verified: "true", aud: "test-client-id" });
+    }
+    if (requestURL.pathname === "/rest/v1/recipe_optimization_filters") {
+      assert.equal(requestURL.searchParams.get("is_active"), "eq.true");
+      assert.equal(requestURL.searchParams.get("is_user_facing"), "eq.true");
+      assert.match(requestURL.searchParams.get("slug"), /high-protein/);
+      assert.match(requestURL.searchParams.get("slug"), /mediterranean-style/);
+      return Response.json(filterRows);
+    }
+    assert.equal(String(url), "https://api.openai.com/v1/responses");
+    responseRequestBody = JSON.parse(options.body);
+    return Response.json({
+      output: [{ content: [{ type: "output_text", text: JSON.stringify(generatedRecipe) }] }],
+    });
+  };
+
+  const response = await worker.fetch(
+    new Request("https://worker.test/admin/catalog/recipes/generate", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer valid-google-token",
+        Origin: "https://fifteenhundred.app",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        mealType: "lunch",
+        goalSlugs: ["high-protein", "mediterranean-style"],
+        brief: "Keep it dairy-light.",
+      }),
+    }),
+    env,
+  );
+
+  assert.equal(response.status, 200, await response.clone().text());
+  const payload = await response.json();
+  assert.deepEqual(payload.recipe.mealTypes, ["lunch"]);
+  assert.equal(payload.recipe.sourceType, "ai");
+  assert.equal(payload.recipe.sodiumMgPerServing, 510);
+  assert.equal(responseRequestBody.model, "gpt-5.4-mini");
+  assert.equal(responseRequestBody.text.format.strict, true);
+  assert.ok(responseRequestBody.text.format.schema.required.includes("servingWeightGrams"));
+  assert.match(responseRequestBody.input[0].content[0].text, /lunch recipe draft/i);
+  assert.match(responseRequestBody.input[0].content[0].text, /High Protein/);
+  assert.match(responseRequestBody.input[0].content[0].text, /Mediterranean Style/);
+  assert.match(responseRequestBody.input[0].content[0].text, /Keep it dairy-light/);
 }
 
 async function managesCatalogRecipes() {

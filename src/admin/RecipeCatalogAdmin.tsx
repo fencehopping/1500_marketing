@@ -158,8 +158,14 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
   const [optimizationScores, setOptimizationScores] = useState<OptimizationScore[]>([]);
   const [draft, setDraft] = useState<CatalogRecipe>(emptyRecipe);
   const [selectedTags, setSelectedTags] = useState<Set<string>>(new Set());
-  const [sourceMode, setSourceMode] = useState<"url" | "text" | "ai">("url");
+  const [sourceMode, setSourceMode] = useState<"url" | "text">("url");
   const [sourceInput, setSourceInput] = useState("");
+  const [isAIGeneratorOpen, setIsAIGeneratorOpen] = useState(false);
+  const [aiMealType, setAIMealType] = useState("dinner");
+  const [aiGoalSlugs, setAIGoalSlugs] = useState<Set<string>>(new Set());
+  const [aiGoalQuery, setAIGoalQuery] = useState("");
+  const [aiBrief, setAIBrief] = useState("");
+  const [aiGeneratorError, setAIGeneratorError] = useState("");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [optimizationQuery, setOptimizationQuery] = useState("");
@@ -182,10 +188,33 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
   const optimizationCategories = useMemo(() => [...new Set(optimizationFilters.map((filter) => filter.category))], [optimizationFilters]);
   const scoresByFilter = useMemo(() => new Map(optimizationScores.map((score) => [score.filterID, score])), [optimizationScores]);
   const publishIssues = useMemo(() => publicationIssues(draft), [draft]);
+  const aiGoalGroups = useMemo(() => {
+    const query = aiGoalQuery.trim().toLowerCase();
+    const groups = new Map<string, OptimizationFilter[]>();
+    optimizationFilters
+      .filter((filter) => filter.isActive && filter.isUserFacing)
+      .filter((filter) => !query || `${filter.label} ${filter.shortLabel} ${filter.description} ${filter.category}`.toLowerCase().includes(query))
+      .forEach((filter) => groups.set(filter.category, [...(groups.get(filter.category) ?? []), filter]));
+    return [...groups.entries()];
+  }, [optimizationFilters, aiGoalQuery]);
 
   useEffect(() => {
     if (enabled) void Promise.all([loadRecipes(), loadTags(), loadOptimizationFilters()]);
   }, [enabled]);
+
+  useEffect(() => {
+    if (!isAIGeneratorOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && busy !== "source") setIsAIGeneratorOpen(false);
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [isAIGeneratorOpen, busy]);
 
   async function api(path: string, init: RequestInit = {}) {
     if (!credential) throw new Error("Sign in before managing recipes.");
@@ -327,33 +356,80 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
 
   async function analyzeSource() {
     if (!sourceInput.trim()) {
-      onStatus(sourceMode === "ai" ? "Describe the recipe you want." : "Add a URL or recipe text first.");
+      onStatus("Add a URL or recipe text first.");
       return;
     }
     setBusy("source");
     try {
-      let imported: ImportedRecipe;
-      if (sourceMode === "ai") {
-        const data = await api("/admin/catalog/recipes/generate", {
-          method: "POST",
-          body: JSON.stringify({ brief: sourceInput }),
-        }) as { recipe: ImportedRecipe };
-        imported = data.recipe;
-      } else {
-        const data = await api("/recipe/import/analyze", {
-          method: "POST",
-          body: JSON.stringify({
-            text: sourceMode === "text" ? sourceInput : "",
-            urls: sourceMode === "url" ? [sourceInput] : [],
-            images: [],
-          }),
-        }) as ImportedRecipe;
-        imported = data;
-      }
+      const data = await api("/recipe/import/analyze", {
+        method: "POST",
+        body: JSON.stringify({
+          text: sourceMode === "text" ? sourceInput : "",
+          urls: sourceMode === "url" ? [sourceInput] : [],
+          images: [],
+        }),
+      }) as ImportedRecipe;
+      const imported = data;
       setDraft((current) => mergeImport(current, imported, sourceMode));
       onStatus(`Built an editable draft for ${imported.title}. Review it before publishing.`);
     } catch (error) {
       onStatus(message(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function openAIGenerator() {
+    setAIMealType(draft.mealTypes.length === 1 && mealTypes.includes(draft.mealTypes[0]) ? draft.mealTypes[0] : "dinner");
+    setAIGoalSlugs(new Set());
+    setAIGoalQuery("");
+    setAIBrief("");
+    setAIGeneratorError("");
+    setIsAIGeneratorOpen(true);
+  }
+
+  function toggleAIGoal(slug: string) {
+    setAIGoalSlugs((current) => {
+      const next = new Set(current);
+      if (next.has(slug)) {
+        next.delete(slug);
+        setAIGeneratorError("");
+      } else if (next.size >= 8) {
+        setAIGeneratorError("Choose up to 8 goals so the recipe has a clear direction.");
+      } else {
+        next.add(slug);
+        setAIGeneratorError("");
+      }
+      return next;
+    });
+  }
+
+  async function generateAIDraft() {
+    if (!aiGoalSlugs.size) {
+      setAIGeneratorError("Select at least one goal to optimize for.");
+      return;
+    }
+    setBusy("source");
+    setAIGeneratorError("");
+    try {
+      const data = await api("/admin/catalog/recipes/generate", {
+        method: "POST",
+        body: JSON.stringify({
+          mealType: aiMealType,
+          goalSlugs: [...aiGoalSlugs],
+          brief: aiBrief,
+        }),
+      }) as { recipe: ImportedRecipe };
+      setDraft((current) => mergeImport(current, data.recipe, "ai"));
+      setSelectedTags(new Set());
+      setOptimizationScores([]);
+      setActionFeedback(null);
+      setIsAIGeneratorOpen(false);
+      onStatus(`Generated an editable ${aiMealType} draft for ${data.recipe.title}. Review and adjust it before saving.`);
+    } catch (error) {
+      const feedback = message(error);
+      setAIGeneratorError(feedback);
+      onStatus(feedback);
     } finally {
       setBusy(null);
     }
@@ -508,6 +584,7 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
           <p className="admin-panel-description">Import, generate, tag, review, and publish recipes for meal generation.</p>
         </div>
         <div className="image-actions">
+          <button className="button button-primary" type="button" onClick={openAIGenerator}>Generate with AI</button>
           <button className="button button-secondary" type="button" onClick={() => { setDraft(emptyRecipe()); setSelectedTags(new Set()); setActionFeedback(null); }}>New recipe</button>
           <button className="button button-secondary" type="button" disabled={busy === "load"} onClick={() => loadRecipes()}>Refresh</button>
         </div>
@@ -535,9 +612,9 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
         <div className="recipe-catalog-editor">
           <section className="recipe-source-builder">
             <div className="recipe-source-tabs" role="tablist" aria-label="Recipe source">
-              {(["url", "text", "ai"] as const).map((mode) => (
+              {(["url", "text"] as const).map((mode) => (
                 <button type="button" role="tab" aria-selected={sourceMode === mode} className={sourceMode === mode ? "is-selected" : ""} key={mode} onClick={() => setSourceMode(mode)}>
-                  {mode === "url" ? "Import URL" : mode === "text" ? "Paste text" : "Generate with AI"}
+                  {mode === "url" ? "Import URL" : "Paste text"}
                 </button>
               ))}
             </div>
@@ -637,6 +714,38 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
           </div>
         </div>
       </div>
+
+      {isAIGeneratorOpen ? <div className="recipe-ai-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && busy !== "source") setIsAIGeneratorOpen(false); }}>
+        <section className="recipe-ai-modal" role="dialog" aria-modal="true" aria-labelledby="recipe-ai-modal-title">
+          <header className="recipe-ai-modal-header">
+            <div><p className="eyebrow">Custom recipe draft</p><h3 id="recipe-ai-modal-title">Generate with AI</h3><p>Choose a meal and the same goals people can use in the app. You can edit every field after generation.</p></div>
+            <button className="recipe-ai-modal-close" type="button" aria-label="Close generator" disabled={busy === "source"} onClick={() => setIsAIGeneratorOpen(false)}>×</button>
+          </header>
+
+          <div className="recipe-ai-modal-body">
+            <fieldset className="recipe-ai-section"><legend>1. Choose a meal</legend><div className="recipe-ai-meals">
+              {mealTypes.map((type) => <label className={aiMealType === type ? "is-selected" : ""} key={type}><input type="radio" name="ai-meal-type" value={type} checked={aiMealType === type} onChange={() => setAIMealType(type)} /><span>{type}</span></label>)}
+            </div></fieldset>
+
+            <fieldset className="recipe-ai-section"><legend>2. Select goals</legend>
+              <div className="recipe-ai-goal-toolbar"><input type="search" value={aiGoalQuery} placeholder="Search goals" onChange={(event) => setAIGoalQuery(event.target.value)} /><span>{aiGoalSlugs.size}/8 selected</span></div>
+              <div className="recipe-ai-goals">
+                {aiGoalGroups.map(([category, filters]) => <section className="recipe-ai-goal-group" key={category}><h4>{optimizationCategoryLabel(category)}</h4><div className="recipe-ai-goal-grid">
+                  {filters.map((filter) => <label className={aiGoalSlugs.has(filter.slug) ? "is-selected" : ""} key={filter.id} title={filter.description}><input type="checkbox" checked={aiGoalSlugs.has(filter.slug)} onChange={() => toggleAIGoal(filter.slug)} /><span><strong>{filter.label}</strong><small>{filter.description}</small></span></label>)}
+                </div></section>)}
+                {!aiGoalGroups.length ? <p className="admin-empty-state">No matching app goals.</p> : null}
+              </div>
+            </fieldset>
+
+            <label className="recipe-field"><span>Anything else? (optional)</span><textarea rows={3} value={aiBrief} maxLength={1200} placeholder="Cuisine, ingredients to use or avoid, equipment, or other preferences…" onChange={(event) => setAIBrief(event.target.value)} /></label>
+          </div>
+
+          <footer className="recipe-ai-modal-footer">
+            <div>{aiGeneratorError ? <p role="alert">{aiGeneratorError}</p> : <p>The draft will open in the recipe editor and will not be saved automatically.</p>}</div>
+            <div className="image-actions"><button className="button button-secondary" type="button" disabled={busy === "source"} onClick={() => setIsAIGeneratorOpen(false)}>Cancel</button><button className="button button-primary" type="button" disabled={busy === "source" || !aiGoalSlugs.size} onClick={generateAIDraft}>{busy === "source" ? "Generating draft…" : "Generate editable draft"}</button></div>
+          </footer>
+        </section>
+      </div> : null}
     </section>
   );
 }
@@ -658,13 +767,13 @@ function emptyRecipe(): CatalogRecipe {
 }
 
 function mergeImport(current: CatalogRecipe, imported: ImportedRecipe, mode: "url" | "text" | "ai"): CatalogRecipe {
-  return { ...current, title: imported.title, sourceType: imported.sourceType ?? mode, sourceURL: imported.sourceURL ?? (mode === "url" ? current.sourceURL : ""), servings: imported.servings || 1, portionDescription: imported.portionDescription ?? "", prepMinutes: imported.prepMinutes || 0, cookMinutes: imported.cookMinutes || 0, caloriesPerServing: imported.caloriesPerServing || 0, proteinPerServing: imported.proteinPerServing || 0, carbsPerServing: imported.carbsPerServing || 0, fiberPerServing: imported.fiberPerServing || 0, sugarPerServing: imported.sugarPerServing || 0, fatPerServing: imported.fatPerServing || 0, ingredients: imported.ingredients.map((item) => ({ id: item.id, text: item.text ?? item.name ?? "", quantity: item.quantity ?? "", calories: item.calories ?? 0 })), instructions: imported.instructions.map((item) => ({ id: typeof item === "string" ? undefined : item.id, text: typeof item === "string" ? item : item.text })), notes: imported.notes ?? "" };
+  return { ...current, title: imported.title, summary: imported.summary ?? "", sourceType: imported.sourceType ?? mode, sourceURL: imported.sourceURL ?? (mode === "url" ? current.sourceURL : ""), mealTypes: imported.mealTypes ?? current.mealTypes, servings: imported.servings ?? 1, portionDescription: imported.portionDescription ?? "", prepMinutes: imported.prepMinutes ?? 0, cookMinutes: imported.cookMinutes ?? 0, caloriesPerServing: imported.caloriesPerServing ?? 0, proteinPerServing: imported.proteinPerServing ?? 0, carbsPerServing: imported.carbsPerServing ?? 0, fiberPerServing: imported.fiberPerServing ?? 0, sugarPerServing: imported.sugarPerServing ?? 0, fatPerServing: imported.fatPerServing ?? 0, addedSugarPerServing: imported.addedSugarPerServing ?? null, saturatedFatPerServing: imported.saturatedFatPerServing ?? null, sodiumMgPerServing: imported.sodiumMgPerServing ?? null, cholesterolMgPerServing: imported.cholesterolMgPerServing ?? null, potassiumMgPerServing: imported.potassiumMgPerServing ?? null, calciumMgPerServing: imported.calciumMgPerServing ?? null, ironMgPerServing: imported.ironMgPerServing ?? null, magnesiumMgPerServing: imported.magnesiumMgPerServing ?? null, zincMgPerServing: imported.zincMgPerServing ?? null, seleniumMcgPerServing: imported.seleniumMcgPerServing ?? null, vitaminAMcgPerServing: imported.vitaminAMcgPerServing ?? null, vitaminCMgPerServing: imported.vitaminCMgPerServing ?? null, vitaminDMcgPerServing: imported.vitaminDMcgPerServing ?? null, vitaminEMgPerServing: imported.vitaminEMgPerServing ?? null, vitaminKMcgPerServing: imported.vitaminKMcgPerServing ?? null, folateMcgPerServing: imported.folateMcgPerServing ?? null, omega3GPerServing: imported.omega3GPerServing ?? null, servingWeightGrams: imported.servingWeightGrams ?? null, ingredients: imported.ingredients.map((item) => ({ id: item.id, text: item.text ?? item.name ?? "", quantity: item.quantity ?? "", calories: item.calories ?? 0 })), instructions: imported.instructions.map((item) => ({ id: typeof item === "string" ? undefined : item.id, text: typeof item === "string" ? item : item.text })), notes: imported.notes ?? "" };
 }
 
 function ingredientsText(ingredients: Ingredient[]) { return ingredients.map((item) => `${item.quantity} | ${item.text} | ${item.calories}`).join("\n"); }
 function parseIngredients(value: string): Ingredient[] { return value.split("\n").map((line) => { const [quantity = "", text = "", calories = "0"] = line.split("|").map((part) => part.trim()); return { quantity, text, calories: Math.max(0, Number(calories) || 0) }; }); }
 function parseInstructions(value: string): Instruction[] { return value.split("\n").map((text) => ({ text })); }
-function sourcePlaceholder(mode: "url" | "text" | "ai") { return mode === "url" ? "https://example.com/recipe" : mode === "text" ? "Paste ingredients, instructions, notes, or recipe copy…" : "A high-protein weeknight dinner under 500 calories with Mediterranean flavors…"; }
+function sourcePlaceholder(mode: "url" | "text") { return mode === "url" ? "https://example.com/recipe" : "Paste ingredients, instructions, notes, or recipe copy…"; }
 function message(error: unknown) { return error instanceof Error ? error.message : "The recipe request failed."; }
 function publicationIssues(recipe: CatalogRecipe) {
   const issues: string[] = [];
