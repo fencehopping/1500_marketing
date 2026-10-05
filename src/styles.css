@@ -1219,8 +1219,10 @@ h3 {
   position: sticky;
   top: 16px;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
   max-height: calc(100vh - 32px);
+  overflow: hidden;
   padding: 12px;
   border: 1px solid rgba(0, 0, 0, 0.07);
   border-radius: 16px;
@@ -1259,7 +1261,9 @@ h3 {
 }
 
 .recipe-catalog-list {
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .recipe-catalog-list-item {
