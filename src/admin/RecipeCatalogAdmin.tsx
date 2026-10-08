@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import { formatIngredientsText, parseIngredientsText } from "./recipeIngredientText";
 
 type Ingredient = { id?: string; text: string; quantity: string; calories: number };
 type Instruction = { id?: string; text: string };
@@ -686,7 +687,7 @@ export default function RecipeCatalogAdmin({ apiBaseURL, credential, enabled, on
             </div>
           </details>
 
-          <Field label="Ingredients — quantity | ingredient | calories" wide><textarea rows={9} value={ingredientsText(draft.ingredients)} onChange={(event) => setDraft({ ...draft, ingredients: parseIngredients(event.target.value) })} placeholder="1 lb | chicken breast | 750" /></Field>
+          <Field label="Ingredients — one per line (quantity | ingredient | calories optional)" wide><textarea rows={9} value={formatIngredientsText(draft.ingredients)} onChange={(event) => setDraft({ ...draft, ingredients: parseIngredientsText(event.target.value) })} placeholder={"1 lb | chicken breast | 750\nSalt and pepper to taste"} /></Field>
           <Field label="Instructions — one step per line" wide><textarea rows={8} value={draft.instructions.map((item) => item.text).join("\n")} onChange={(event) => setDraft({ ...draft, instructions: parseInstructions(event.target.value) })} /></Field>
           <div className="recipe-form-grid">
             <Field label="Image URL" wide><input type="url" value={draft.imageURL ?? ""} onChange={(event) => setDraft({ ...draft, imageURL: event.target.value || null })} /></Field>
@@ -808,8 +809,6 @@ function recipeAIGoalSlugs(recipe: CatalogRecipe) {
   return Array.isArray(value) ? value.map((slug) => String(slug)).filter(Boolean) : [];
 }
 
-function ingredientsText(ingredients: Ingredient[]) { return ingredients.map((item) => `${item.quantity} | ${item.text} | ${item.calories}`).join("\n"); }
-function parseIngredients(value: string): Ingredient[] { return value.split("\n").map((line) => { const [quantity = "", text = "", calories = "0"] = line.split("|").map((part) => part.trim()); return { quantity, text, calories: Math.max(0, Number(calories) || 0) }; }); }
 function parseInstructions(value: string): Instruction[] { return value.split("\n").map((text) => ({ text })); }
 function sourcePlaceholder(mode: "url" | "text") { return mode === "url" ? "https://example.com/recipe" : "Paste ingredients, instructions, notes, or recipe copy…"; }
 function message(error: unknown) { return error instanceof Error ? error.message : "The recipe request failed."; }
