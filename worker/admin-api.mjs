@@ -2319,7 +2319,7 @@ async function loadRecipePageCopy(url) {
   }
 
   const contentType = response.headers.get("Content-Type") ?? "";
-  const raw = (await response.text()).slice(0, 300_000);
+  const raw = await response.text();
   const copy = contentType.includes("html") || /<html[\s>]/i.test(raw)
     ? readableRecipePageText(raw)
     : raw.trim().slice(0, 40_000);
@@ -2365,6 +2365,7 @@ function readableRecipePageText(html) {
     /<meta[^>]+(?:name|property)=["'](?:description|og:description)["'][^>]+content=["']([^"']*)["']/i,
   )?.[1] ?? "";
   const visible = value
+    .slice(0, 300_000)
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
     .replace(/<(?:svg|noscript|template)\b[^>]*>[\s\S]*?<\/(?:svg|noscript|template)>/gi, " ")

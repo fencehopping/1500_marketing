@@ -96,6 +96,7 @@ const env = {
 try {
   await rejectsMissingAuth();
   await analyzesFlexibleRecipeInput();
+  await findsRecipeJSONLDAfterVisibleTextLimit();
   await analyzesMealFromTextAndPhoto();
   await loadsXRecipeMetadata();
   await analyzesXRecipeVideo();
@@ -298,6 +299,69 @@ async function analyzesFlexibleRecipeInput() {
   assert.match(content[0].text, /1 1\/2 pounds chicken breast/);
   assert.match(content[0].text, /Make this high protein/);
   assert.equal(responseRequestBody.text.format.strict, true);
+}
+
+async function findsRecipeJSONLDAfterVisibleTextLimit() {
+  const recipe = {
+    title: "Late Spinach Chicken",
+    servings: 4,
+    portionDescription: "1 stuffed chicken breast",
+    prepMinutes: 10,
+    cookMinutes: 20,
+    caloriesPerServing: 430,
+    proteinPerServing: 43,
+    carbsPerServing: 7,
+    fiberPerServing: 2,
+    sugarPerServing: 3,
+    fatPerServing: 26,
+    ingredients: [
+      { name: "baby spinach", quantity: "5 ounces", calories: 35 },
+      { name: "chicken breasts", quantity: "4", calories: 1200 },
+    ],
+    instructions: ["Stuff the chicken with spinach and bake."],
+    notes: "Recipe schema appears late in the source HTML.",
+  };
+  const recipeJSONLD = JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "Recipe",
+    name: recipe.title,
+    recipeYield: "4 servings",
+    recipeIngredient: ["5 ounces baby spinach", "4 chicken breasts"],
+    recipeInstructions: [
+      { "@type": "HowToStep", text: "Stuff the chicken with spinach and bake." },
+    ],
+  });
+  let responseRequestBody;
+  globalThis.fetch = async (url, options) => {
+    if (String(url) === "https://example.com/late-recipe-schema") {
+      return new Response(`<!doctype html><html><head><title>${recipe.title}</title></head><body>${
+        "x".repeat(300_100)
+      }<script type="application/ld+json">${recipeJSONLD}</script></body></html>`, {
+        headers: { "Content-Type": "text/html" },
+      });
+    }
+    if (String(url) === "https://api.openai.com/v1/responses") {
+      responseRequestBody = JSON.parse(options.body);
+      return Response.json({
+        output: [{ content: [{ type: "output_text", text: JSON.stringify(recipe) }] }],
+      });
+    }
+    throw new Error(`Unexpected fetch: ${String(url)}`);
+  };
+
+  const response = await worker.fetch(
+    new Request("https://worker.test/recipe/import/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ urls: ["https://example.com/late-recipe-schema"] }),
+    }),
+    env,
+  );
+
+  assert.equal(response.status, 200);
+  const prompt = responseRequestBody.input[0].content[0].text;
+  assert.match(prompt, /5 ounces baby spinach/);
+  assert.match(prompt, /Stuff the chicken with spinach and bake/);
 }
 
 async function loadsXRecipeMetadata() {
